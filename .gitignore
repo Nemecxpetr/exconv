@@ -513,3 +513,8 @@ samples/output/xmodal_sound2image/test1__by__original__filter.png
 samples/output/xmodal_sound2image/test1__by__original.png
 samples/output/xmodal_sound2image/test1__by__test_kernel__filter.png
 samples/output/xmodal_sound2image/test1__by__test_kernel.png
+samples/input/audio/original.wav
+samples/input/audio/test_kernel.wav
+samples/input/img/BHROX-11.jpg
+samples/input/img/glitch_bean.png
+samples/input/img/test1.jpg
