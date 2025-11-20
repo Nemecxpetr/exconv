@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "exconv"
+version = "0.1.0"
+description = "Experimental convolution toolkit for sound, image, and cross-modal synthesis."
+authors = [
+    { name = "Petr Němec" }
+]
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "soundfile>=0.12",
+    "pillow>=10.0",
+    "imageio>=2.33",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "black>=24.0",
+    "ruff>=0.3",
+    "mypy>=1.8",
+    "notebook>=7.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/Nemecxpetr/experimental-convolution"
+Documentation = "https://github.com/Nemecxpetr/experimental-convolution/docs"
+Issues = "https://github.com/Nemecxpetr/experimental-convolution/issues"
+
+[project.scripts]
+exconv = "exconv.cli.exconv_cli:main"
+exconv-image = "exconv.cli.image_demo:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
