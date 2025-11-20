@@ -1,0 +1,3 @@
+[console_scripts]
+exconv = exconv.cli.exconv_cli:main
+exconv-image = exconv.cli.image_demo:main
