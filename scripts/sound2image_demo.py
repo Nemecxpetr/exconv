@@ -10,9 +10,24 @@ from exconv.xmodal.sound2image import spectral_sculpt
 
 
 @click.command()
-@click.argument("image_path", type=click.Path(exists=True, dir_okay=False))
-@click.argument("audio_path", type=click.Path(exists=True, dir_okay=False))
-@click.argument("output_path", type=click.Path(dir_okay=False))
+@click.argument(
+    "image_path", 
+    type=click.Path(exists=True, dir_okay=False),
+    default="samples/input/test_assets/img_checker.png",
+    show_default=True,
+)
+@click.argument(
+    "audio_path", 
+    type=click.Path(exists=True, dir_okay=False),
+    default="samples/input/test_assets/audio_long_sines.wav",
+    show_default=True,
+)
+@click.argument(
+    "output_path",
+    type=click.Path(dir_okay=False),
+    default="samples/output/img/sound2image_demo/demo.png",
+    show_default=True,
+)
 @click.option(
     "--mode",
     type=click.Choice(["mono", "stereo", "mid-side"]),

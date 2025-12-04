@@ -14,12 +14,14 @@ license = { file = "LICENSE" }
 requires-python = ">=3.9"
 
 dependencies = [
-    "numpy>=1.24",
+    "numpy>=1.26.0,<2.0", 
     "scipy>=1.11",
     "soundfile>=0.12",
     "pillow>=10.0",
-    "imageio>=2.33",
+    "imageio[ffmpeg]>=2.33",
     "matplotlib>=3.8",
+    "click>=8.1",        
+    "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
@@ -32,9 +34,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Nemecxpetr/experimental-convolution"
-Documentation = "https://github.com/Nemecxpetr/experimental-convolution/docs"
-Issues = "https://github.com/Nemecxpetr/experimental-convolution/issues"
+Homepage = "https://github.com/Nemecxpetr/exconv"
+Documentation = "https://github.com/Nemecxpetr/exconv/docs"
+Issues = "https://github.com/Nemecxpetr/exconv/issues"
 
 [project.scripts]
 exconv = "exconv.cli.exconv_cli:main"

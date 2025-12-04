@@ -11,6 +11,7 @@ This module exposes:
 Submodules:
 - exconv.io.audio
 - exconv.io.image
+- exconv.io.io_video
 """
 
 from .audio import (
@@ -30,6 +31,11 @@ from .image import (
     luma_to_rgb,
 )
 
+from .io_video import (
+    read_video_frames,
+    write_video_frames,
+)
+
 __all__ = [
     # audio
     "read_audio",
@@ -44,4 +50,7 @@ __all__ = [
     "as_uint8",
     "rgb_to_luma",
     "luma_to_rgb",
+    # video
+    "read_video_frames",
+    "write_video_frames",
 ]
