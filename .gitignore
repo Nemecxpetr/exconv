@@ -1,18 +1,28 @@
 # Byte-compiled / caches
 __pycache__/
+**/__pycache__/
 *.py[cod]
-*.pyo
 *.pyd
 
 # Virtual environments
 .venv/
-env/
 venv/
+env/
 
 # Build / packaging
 build/
 dist/
+.eggs/
 *.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Tooling caches
+.pytest_cache/
+.coverage
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 
 # IDE / editor
 .vscode/
@@ -26,15 +36,18 @@ Thumbs.db
 samples/output/
 examples/output/
 outputs/
-
-# Logs / temp
+out_tmp.*
 *.log
 tmp/
 temp/
 
-# Coverage / test
-.coverage
-.pytest_cache/
+# Ignore all sample inputs except test_assets and curated folders
+samples/input/*
+!samples/input/test_assets/
+!samples/input/test_assets/**
+!samples/input/audio/
+!samples/input/img/
+!samples/input/video/
 
-# ImageIO / ffmpeg temp files
+# Coverage / temp media
 *.tmp_noaudio.mp4
