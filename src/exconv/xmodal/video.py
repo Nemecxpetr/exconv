@@ -56,6 +56,25 @@ def _ffmpeg_available() -> bool:
         return False
 
 
+_VIDEO_EXTS = {
+    ".mp4",
+    ".m4v",
+    ".mov",
+    ".mkv",
+    ".avi",
+    ".webm",
+    ".mpg",
+    ".mpeg",
+    ".wmv",
+    ".flv",
+    ".ogv",
+}
+
+
+def _looks_like_video(path: Path) -> bool:
+    return path.suffix.lower() in _VIDEO_EXTS
+
+
 def _extract_audio_from_video(
     video_path: Path, target_sr: Optional[int] = None
 ) -> Tuple[np.ndarray, int]:
@@ -514,6 +533,7 @@ def biconv_video_arrays(
     # serial/parallel behavior
     serial_mode: DualSerialMode = "parallel",
     audio_length_mode: AudioLengthMode = "pad-zero",
+    block_size: int = 1,
 ) -> Tuple[List[np.ndarray], np.ndarray]:
     """
     Convolve video frames and audio with each other per frame.
@@ -533,6 +553,8 @@ def biconv_video_arrays(
         raise ValueError("fps must be > 0")
     if sr <= 0:
         raise ValueError("sr must be > 0")
+    if block_size <= 0:
+        raise ValueError("block_size must be positive")
 
     # match audio length to video duration
     ideal_len = int(round(len(frames) * sr / fps))
@@ -542,27 +564,48 @@ def biconv_video_arrays(
     processed_frames: List[np.ndarray] = []
     audio_chunks: List[np.ndarray] = []
 
-    frame_iter = tqdm(frames, total=len(frames), desc="bi-conv video", unit="frame")
-    for idx, frame in enumerate(frame_iter):
+    n_frames = len(frames)
+    n_blocks = (n_frames + block_size - 1) // block_size
+    block_iter = tqdm(
+        range(0, n_frames, block_size),
+        total=n_blocks,
+        desc="bi-conv video blocks",
+        unit="block",
+    )
 
-        frame_arr = np.asarray(frame)
-        start, stop = _slice_for_frame(idx, fps, sr, n_samples)
+    for block_start in block_iter:
+        block_end = min(block_start + block_size, n_frames) - 1
+        block_frames = [np.asarray(f) for f in frames[block_start : block_end + 1]]
+
+        start, _ = _slice_for_frame(block_start, fps, sr, n_samples)
+        _, stop = _slice_for_frame(block_end, fps, sr, n_samples)
         if stop <= start:
-            chunk = np.zeros((max(1, int(round(sr / fps))), audio.shape[1]), dtype=np.float32)
+            expected = max(1, int(round((block_end - block_start + 1) * sr / fps)))
+            chunk = np.zeros((expected, audio.shape[1]), dtype=np.float32)
         else:
             chunk = audio[start:stop, :]
 
+        # mean image for image->sound branch
+        img_mean = np.mean(np.stack(block_frames, axis=0), axis=0)
+
+        # process according to serial mode, but at block granularity
+        block_img_proc: List[np.ndarray] = []
+
         if serial_mode == "parallel":
-            img_proc = spectral_sculpt(
-                image=frame_arr,
-                audio=chunk,
-                sr=sr,
-                mode=s2i_mode,
-                colorspace=s2i_colorspace,
-                normalize=True,
-            )
+            # sound->image uses original frames + shared chunk
+            for frame_arr in block_frames:
+                img_proc = spectral_sculpt(
+                    image=frame_arr,
+                    audio=chunk,
+                    sr=sr,
+                    mode=s2i_mode,
+                    colorspace=s2i_colorspace,
+                    normalize=True,
+                )
+                block_img_proc.append(img_proc)
+
             aud_proc = _image2sound_apply(
-                img=frame_arr,
+                img=img_mean,
                 audio=chunk,
                 sr=sr,
                 mode=i2s_mode,
@@ -577,16 +620,21 @@ def biconv_video_arrays(
                 smoothing=i2s_smoothing,
             )
         elif serial_mode == "serial-image-first":
-            img_proc = spectral_sculpt(
-                image=frame_arr,
-                audio=chunk,
-                sr=sr,
-                mode=s2i_mode,
-                colorspace=s2i_colorspace,
-                normalize=True,
-            )
+            for frame_arr in block_frames:
+                img_proc = spectral_sculpt(
+                    image=frame_arr,
+                    audio=chunk,
+                    sr=sr,
+                    mode=s2i_mode,
+                    colorspace=s2i_colorspace,
+                    normalize=True,
+                )
+                block_img_proc.append(img_proc)
+
+            img_mean_proc = np.mean(np.stack(block_img_proc, axis=0), axis=0)
+
             aud_proc = _image2sound_apply(
-                img=img_proc,
+                img=img_mean_proc,
                 audio=chunk,
                 sr=sr,
                 mode=i2s_mode,
@@ -602,7 +650,7 @@ def biconv_video_arrays(
             )
         elif serial_mode == "serial-sound-first":
             aud_proc = _image2sound_apply(
-                img=frame_arr,
+                img=img_mean,
                 audio=chunk,
                 sr=sr,
                 mode=i2s_mode,
@@ -616,23 +664,27 @@ def biconv_video_arrays(
                 phase_mode=i2s_phase_mode,
                 smoothing=i2s_smoothing,
             )
-            img_proc = spectral_sculpt(
-                image=frame_arr,
-                audio=aud_proc,
-                sr=sr,
-                mode=s2i_mode,
-                colorspace=s2i_colorspace,
-                normalize=True,
-            )
+            for frame_arr in block_frames:
+                img_proc = spectral_sculpt(
+                    image=frame_arr,
+                    audio=aud_proc,
+                    sr=sr,
+                    mode=s2i_mode,
+                    colorspace=s2i_colorspace,
+                    normalize=True,
+                )
+                block_img_proc.append(img_proc)
         else:
             raise ValueError(f"Unknown serial_mode: {serial_mode}")
 
-        if np.issubdtype(img_proc.dtype, np.floating):
-            frame_u8 = np.clip(img_proc * 255.0, 0.0, 255.0).astype(np.uint8)
-        else:
-            frame_u8 = np.clip(img_proc, 0, 255).astype(np.uint8)
+        # push processed frames
+        for img_proc in block_img_proc:
+            if np.issubdtype(img_proc.dtype, np.floating):
+                frame_u8 = np.clip(img_proc * 255.0, 0.0, 255.0).astype(np.uint8)
+            else:
+                frame_u8 = np.clip(img_proc, 0, 255).astype(np.uint8)
+            processed_frames.append(frame_u8)
 
-        processed_frames.append(frame_u8)
         audio_chunks.append(aud_proc)
 
     audio_out = np.concatenate(audio_chunks, axis=0) if audio_chunks else np.zeros(
@@ -660,6 +712,7 @@ def biconv_video_from_files(
     i2s_n_bins: int = 256,
     serial_mode: DualSerialMode = "parallel",
     audio_length_mode: AudioLengthMode = "pad-zero",
+    block_size: int = 1,
     out_video: str | Path | None = None,
     out_audio: str | Path | None = None,
     mux_output: bool = False,
@@ -667,8 +720,9 @@ def biconv_video_from_files(
     """
     File-based bi-directional video processor.
 
-    audio_path can point to the original video audio or any external source.
-    If None, attempts to extract audio from the video.
+    audio_path can point to the original video audio, any external audio, or
+    even another video file (audio will be extracted automatically). If None,
+    attempts to extract audio from the primary video.
     """
     video_path = _as_path(video_path)
     audio_used: Path | None = _as_path(audio_path) if audio_path else None
@@ -676,7 +730,10 @@ def biconv_video_from_files(
     if audio_used is None:
         audio, sr = _extract_audio_from_video(video_path)
     else:
-        audio, sr = read_audio(audio_used, dtype="float32", always_2d=True)
+        if _looks_like_video(audio_used):
+            audio, sr = _extract_audio_from_video(audio_used)
+        else:
+            audio, sr = read_audio(audio_used, dtype="float32", always_2d=True)
     frames, meta_fps = read_video_frames(video_path)
 
     if fps is None:
@@ -705,6 +762,7 @@ def biconv_video_from_files(
         i2s_n_bins=i2s_n_bins,
         serial_mode=serial_mode,
         audio_length_mode=audio_length_mode,
+        block_size=block_size,
     )
 
     temp_video: Path | None = None
@@ -740,8 +798,18 @@ def biconv_video_from_files(
             str(temp_video),
             "-i",
             str(temp_audio),
-            "-c",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
             "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "256k",
+            "-movflags",
+            "+faststart",
             str(out_video),
         ]
         subprocess.run(cmd, check=True)

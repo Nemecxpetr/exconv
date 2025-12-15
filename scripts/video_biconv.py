@@ -4,11 +4,8 @@ from pathlib import Path
 
 import click
 
-from exconv.xmodal import (
-    biconv_video_from_files,
-    DualSerialMode,
-    AudioLengthMode,
-)
+from exconv.xmodal import DualSerialMode, AudioLengthMode
+from exconv.cli.video_biconv import run_video_biconv
 
 
 @click.command()
@@ -66,6 +63,13 @@ from exconv.xmodal import (
     default="pad-zero",
     show_default=True,
     help="How to match audio length to video duration.",
+)
+@click.option(
+    "--block-size",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Process frames in blocks of this size (e.g. 12, 24, 50, 120...) using the same audio chunk.",
 )
 # sound->image
 @click.option(
@@ -162,6 +166,7 @@ def main(
     mux: bool,
     serial_mode: DualSerialMode,
     audio_length_mode: AudioLengthMode,
+    block_size: int,
     s2i_mode: str,
     s2i_colorspace: str,
     i2s_mode: str,
@@ -178,44 +183,32 @@ def main(
     """
     Bi-directional video convolution: sound->image and image->sound per frame.
     """
-    # resolve impulse len
-    impulse_len_resolved: int | str
-    if i2s_impulse_len == "auto":
-        impulse_len_resolved = "auto"
-    else:
-        try:
-            impulse_len_resolved = int(i2s_impulse_len)
-        except ValueError:
-            raise click.BadParameter("i2s-impulse-len must be integer or 'auto'")
-
-    frames_out, audio_out, fps_used, sr = biconv_video_from_files(
-        video_path=video_path,
-        audio_path=audio_path,
-        fps=fps,
-        s2i_mode=s2i_mode,  # type: ignore[arg-type]
-        s2i_colorspace=s2i_colorspace,  # type: ignore[arg-type]
-        i2s_mode=i2s_mode,  # type: ignore[arg-type]
-        i2s_colorspace=i2s_colorspace,  # type: ignore[arg-type]
-        i2s_pad_mode=i2s_pad_mode,  # type: ignore[arg-type]
-        i2s_impulse_len=impulse_len_resolved,  # type: ignore[arg-type]
-        i2s_radius_mode=i2s_radius_mode,  # type: ignore[arg-type]
-        i2s_phase_mode=i2s_phase_mode,  # type: ignore[arg-type]
-        i2s_smoothing=i2s_smoothing,  # type: ignore[arg-type]
-        i2s_impulse_norm=i2s_impulse_norm,  # type: ignore[arg-type]
-        i2s_out_norm=i2s_out_norm,  # type: ignore[arg-type]
-        i2s_n_bins=i2s_n_bins,
-        serial_mode=serial_mode,
-        audio_length_mode=audio_length_mode,
-        out_video=out_video,
-        out_audio=out_audio,
-        mux_output=mux,
-    )
-
-    print(f"[done] wrote video {out_video} @ {fps_used:.3f} fps")
-    if out_audio:
-        print(f"[done] wrote audio {out_audio} (shape={audio_out.shape}, sr={sr})")
-    elif mux:
-        print(f"[done] audio muxed into {out_video} (shape={audio_out.shape}, sr={sr})")
+    try:
+        return run_video_biconv(
+            video_path=video_path,
+            audio_path=audio_path,
+            out_video=out_video,
+            out_audio=out_audio,
+            fps=fps,
+            mux=mux,
+            serial_mode=serial_mode,
+            audio_length_mode=audio_length_mode,
+            block_size=block_size,
+            s2i_mode=s2i_mode,
+            s2i_colorspace=s2i_colorspace,
+            i2s_mode=i2s_mode,
+            i2s_colorspace=i2s_colorspace,
+            i2s_pad_mode=i2s_pad_mode,
+            i2s_impulse_len=i2s_impulse_len,
+            i2s_radius_mode=i2s_radius_mode,
+            i2s_phase_mode=i2s_phase_mode,
+            i2s_smoothing=i2s_smoothing,
+            i2s_impulse_norm=i2s_impulse_norm,
+            i2s_out_norm=i2s_out_norm,
+            i2s_n_bins=i2s_n_bins,
+        )
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
 
 
 if __name__ == "__main__":

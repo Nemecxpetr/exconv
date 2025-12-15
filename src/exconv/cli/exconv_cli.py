@@ -7,6 +7,7 @@ from typing import Optional, Dict
 import numpy as np
 
 from exconv import __version__  # version helper :contentReference[oaicite:0]{index=0}
+from exconv.cli.video_biconv import register_video_biconv_subcommand
 from exconv.io import (
     read_audio,
     write_audio,
@@ -274,7 +275,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_img.set_defaults(func=_cmd_img_auto)
 
-   # ---- sound2image ----
+    # ---- sound2image ----
     p_s2i = subparsers.add_parser(
         "sound2image",
         help="Spectrally sculpt an image using an audio file.",
@@ -313,6 +314,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable output normalization/clipping to [0,1].",
     )
     p_s2i.set_defaults(func=_cmd_sound2image, normalize=True)
+
+    # ---- video-biconv ----
+    register_video_biconv_subcommand(subparsers)
 
     return parser
 

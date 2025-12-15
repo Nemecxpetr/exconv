@@ -452,11 +452,26 @@ parsed by `_parse_gaussian_kernel_spec`.
 exconv sound2image     --img img.png     --audio audio.wav     --out sculpted.png     --colorspace luma
 ```
 
-Provides a CLI faade over `spectral_sculpt` for quick experiments.
-
----
-
-## 7. Image demo CLI (`exconv-image`)
+Provides a CLI faade over `spectral_sculpt` for quick experiments.
+
+### 6.5 `video-biconv`
+
+```bash
+exconv video-biconv     --video input.mp4     --out-video out_biconv.mp4     --serial-mode parallel     --audio-length-mode pad-zero     --i2s-mode radial     --i2s-impulse-len auto
+```
+
+Key notes:
+
+- `--audio` is optional; if omitted, audio is extracted from the input video (ffmpeg required). If `--audio` points to a video file, its audio track is auto-extracted.
+- `--serial-mode`: `parallel`, `serial-image-first`, `serial-sound-first`.
+- `--audio-length-mode`: `trim`, `pad-zero`, `pad-loop`, `pad-noise`, `center-zero`.
+- `--block-size`: process frames in blocks (e.g., 12/24/50/120/240) that share one audio chunk; audio is derived from the mean image of each block.
+- Sound->image options mirror `spectral_sculpt` (`--s2i-mode` mono/stereo/mid-side, `--s2i-colorspace` luma/color).
+- Image->sound options mirror the image2sound demo (`--i2s-mode` flat/hist/radial with colorspace/phase/padding/length controls).
+
+---
+
+## 7. Image demo CLI (`exconv-image`)
 
 The legacy image demo is exposed as a separate entry point:
 

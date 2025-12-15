@@ -65,7 +65,7 @@ def _rgb_to_ycbcr(rgb: np.ndarray) -> np.ndarray:
 
 def _ycbcr_to_rgb(ycbcr: np.ndarray) -> np.ndarray:
     """
-    Inverse YCbCr → RGB (approx. BT.601).
+    Inverse YCbCr -> RGB (approx. BT.601).
     Input/Output float32, not clipped.
     """
     ycbcr = np.asarray(ycbcr, dtype=np.float32)
@@ -78,9 +78,34 @@ def _ycbcr_to_rgb(ycbcr: np.ndarray) -> np.ndarray:
     return np.stack([r, g, b], axis=-1).astype(np.float32)
 
 
+def _normalize_01_global(x: np.ndarray) -> np.ndarray:
+    """Rescale array to 0..1 using global min/max; if flat, return zeros."""
+    x = np.asarray(x, dtype=np.float32)
+    xmin = float(np.min(x))
+    xmax = float(np.max(x))
+    if xmax - xmin < 1e-8:
+        return np.zeros_like(x, dtype=np.float32)
+    return ((x - xmin) / (xmax - xmin)).astype(np.float32)
+
+
+def _normalize_chroma(ch: np.ndarray) -> np.ndarray:
+    """
+    Center chroma around 0.5 and squash extremes to avoid dominant casts.
+    Uses 99th percentile of |delta| as scale, maps to +/-0.25 range.
+    """
+    ch = np.asarray(ch, dtype=np.float32) - 0.5
+    if ch.size == 0:
+        return np.zeros_like(ch, dtype=np.float32)
+    scale = float(np.percentile(np.abs(ch), 99.0))
+    if scale > 1e-8:
+        ch = ch / scale * 0.25
+    ch = np.clip(ch + 0.5, 0.0, 1.0)
+    return ch.astype(np.float32)
+
+
 def _fft_filter_apply(img2d: np.ndarray, H2: np.ndarray) -> np.ndarray:
     """
-    2D FFT filter: FFT2 → multiply → IFFT2 (real).
+    2D FFT filter: FFT2 -> multiply -> IFFT2 (real).
     img2d, H2 : (H,W)
     """
     img2d = np.asarray(img2d, dtype=np.float32)
@@ -116,8 +141,23 @@ def _clip_01(x: np.ndarray) -> np.ndarray:
     return np.clip(x, 0.0, 1.0)
 
 
+def _normalize_chroma(ch: np.ndarray) -> np.ndarray:
+    """
+    Center chroma around 0.5 and squash extremes to avoid dominant casts.
+    Uses 99th percentile of |delta| as scale, maps to +/-0.25 range.
+    """
+    ch = np.asarray(ch, dtype=np.float32) - 0.5
+    if ch.size == 0:
+        return np.zeros_like(ch, dtype=np.float32)
+    scale = float(np.percentile(np.abs(ch), 99.0))
+    if scale > 1e-8:
+        ch = ch / scale * 0.25
+    ch = np.clip(ch + 0.5, 0.0, 1.0)
+    return ch.astype(np.float32)
+
+
 # ---------------------------------------------------------------------
-# Audio → curves helpers
+# Audio -> curves helpers
 # ---------------------------------------------------------------------
 
 def _prepare_audio_channels(audio: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -168,6 +208,9 @@ def spectral_sculpt(
     mode: Mode = "mono",
     colorspace: ColorMode = "luma",
     normalize: bool = True,
+    safe_color: bool = True,
+    chroma_strength: float = 0.5,
+    chroma_clip: float = 0.25,
 ) -> np.ndarray:
     """
     Sculpt an image using the spectrum of an audio signal.
@@ -177,46 +220,46 @@ def spectral_sculpt(
     mode = "mono"
         - Build a mono spectrum from the audio (downmix stereo).
         - If colorspace == "luma":
-            • Convert image → luma
-            • Radial filter with mono curve
-            • Return luma (2D) or luma expanded back to RGB (if input was RGB).
+             Convert image -> luma
+             Radial filter with mono curve
+             Return luma (2D) or luma expanded back to RGB (if input was RGB).
         - If colorspace == "color":
-            • Convert image → YCbCr
-            • Filter Y with mono curve
-            • Leave Cb, Cr unchanged
-            • Convert back to RGB.
+             Convert image -> YCbCr
+             Filter Y with mono curve
+             Leave Cb, Cr unchanged
+             Convert back to RGB.
 
     mode = "stereo"
         - Requires stereo (or will auto-make stereo from mono).
         - Build spectra:
-            • S_mono from mono = (L+R)/2
-            • S_L from left
-            • S_R from right
+             S_mono from mono = (L+R)/2
+             S_L from left
+             S_R from right
         - If colorspace == "luma":
-            • Same as "mono": apply only S_mono to luma, ignore color.
+             Same as "mono": apply only S_mono to luma, ignore color.
         - If colorspace == "color":
-            • Convert image → YCbCr
-            • Y  filtered with S_mono (radial)
-            • Cb filtered with S_L (radial)
-            • Cr filtered with S_R (radial)
-            • Convert back to RGB.
+             Convert image -> YCbCr
+             Y  filtered with S_mono (radial)
+             Cb filtered with S_L (radial)
+             Cr filtered with S_R (radial)
+             Convert back to RGB.
 
     mode = "mid-side"
         - mid = (L+R)/2
         - sideL = L - mid, sideR = R - mid
         - Build spectra:
-            • S_mid   from mid
-            • S_sideL from sideL
-            • S_sideR from sideR
+             S_mid   from mid
+             S_sideL from sideL
+             S_sideR from sideR
         - If colorspace == "luma":
-            • Convert image → luma
-            • Filter with S_mid only (no color encodes).
+             Convert image -> luma
+             Filter with S_mid only (no color encodes).
         - If colorspace == "color":
-            • Convert image → YCbCr
-            • Y  filtered with S_mid
-            • Cb filtered with S_sideL
-            • Cr filtered with S_sideR
-            • Convert back to RGB.
+             Convert image -> YCbCr
+             Y  filtered with S_mid
+             Cb filtered with S_sideL
+             Cr filtered with S_sideR
+             Convert back to RGB.
 
     Parameters
     ----------
@@ -232,6 +275,12 @@ def spectral_sculpt(
         - "color": YCbCr filtering as described above.
     normalize : bool
         If True, normalize the final output to [0,1].
+    safe_color : bool
+        If True, applies chroma-safe normalization to reduce casts.
+    chroma_strength : float
+        Blend between original chroma (0.0) and fully filtered chroma (1.0).
+    chroma_clip : float
+        Maximum absolute chroma deviation from 0.5 when safe_color is True.
 
     Returns
     -------
@@ -335,6 +384,12 @@ def spectral_sculpt(
         Cb_f = _fft_filter_apply(Cb, H_sideL)
         Cr_f = _fft_filter_apply(Cr, H_sideR)
 
+    # blend chroma with original to reduce casts
+    chroma_strength = float(np.clip(chroma_strength, 0.0, 1.0))
+    if chroma_strength < 1.0:
+        Cb_f = Cb * (1.0 - chroma_strength) + Cb_f * chroma_strength
+        Cr_f = Cr * (1.0 - chroma_strength) + Cr_f * chroma_strength
+
     ycbcr_f = np.stack([Y_f, Cb_f, Cr_f], axis=-1)
 
     # soft clip YCbCr to avoid extreme values before RGB conversion
@@ -342,7 +397,20 @@ def spectral_sculpt(
     rgb_out = _ycbcr_to_rgb(ycbcr_f)
 
     if normalize:
-        # For color, don’t rescale globally – just clip to 0..1
-        rgb_out = _clip_01(rgb_out)
+        if safe_color:
+            # Normalize Y globally, squash chroma, then clip RGB
+            ycbcr_norm = np.empty_like(ycbcr_f)
+            ycbcr_norm[..., 0] = _normalize_01_global(ycbcr_f[..., 0])
+            ycbcr_norm[..., 1] = _normalize_chroma(ycbcr_f[..., 1])
+            ycbcr_norm[..., 2] = _normalize_chroma(ycbcr_f[..., 2])
+            # hard clamp chroma around 0.5
+            clip = max(0.0, float(chroma_clip))
+            if clip > 0.0:
+                ycbcr_norm[..., 1] = np.clip(ycbcr_norm[..., 1], 0.5 - clip, 0.5 + clip)
+                ycbcr_norm[..., 2] = np.clip(ycbcr_norm[..., 2], 0.5 - clip, 0.5 + clip)
+            rgb_out = _ycbcr_to_rgb(ycbcr_norm)
+            rgb_out = _clip_01(rgb_out)
+        else:
+            rgb_out = _clip_01(rgb_out)
 
     return rgb_out

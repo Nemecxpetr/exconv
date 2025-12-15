@@ -59,4 +59,4 @@ def write_video_frames(
     if not frames_list:
         raise ValueError("No frames to write.")
 
-    iio.imwrite(path, frames_list, fps=fps)
+    iio.imwrite(path, frames_list, fps=fps, macro_block_size=None)

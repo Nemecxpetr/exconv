@@ -22,7 +22,7 @@ pip install -e .
 ```
 
 Notes:
-- `ffmpeg` is required for video audio extraction/muxing (used by `imageio[ffmpeg]` and `scripts/video_biconv.py`).
+- `ffmpeg` is required for video audio extraction/muxing (used by `imageio[ffmpeg]` and the `video-biconv` command).
 - `tqdm` provides progress bars for per-frame processing.
 
 After installation, you should have:
@@ -149,7 +149,7 @@ Use the included samples for a quick spin:
 - Image auto: `exconv img-auto --in samples/input/img/glitch_bean.png --out samples/output/img/glitch_auto.png`
 - Sound→image: `exconv sound2image --img samples/input/img/glitch_bean.png --audio samples/input/audio/original.wav --out samples/output/img/glitch_sculpt.png --colorspace luma`
 - Image→sound: `python scripts/image2sound_demo.py --audio samples/input/test_assets/audio_long_sines.wav --image samples/input/test_assets/img_checker.png --mode radial --impulse-len auto --phase-mode spiral --out-dir samples/output/audio/img2sound_demo`
-- Bi-conv video: `python scripts/video_biconv.py --video samples/input/video/test_01.mp4 --out-video samples/output/video/test_01_biconv.mp4 --out-audio samples/output/audio/test_01_biconv.wav --serial-mode parallel --audio-length-mode pad-zero --i2s-phase-mode spiral --i2s-impulse-len auto`
+- Bi-conv video: `exconv video-biconv --video samples/input/video/test_01.mp4 --out-video samples/output/video/test_01_biconv.mp4 --out-audio samples/output/audio/test_01_biconv.wav --serial-mode parallel --audio-length-mode pad-zero --i2s-phase-mode spiral --i2s-impulse-len auto`
 
 The package exposes a small demo CLI in `exconv.cli.exconv_cli`, registered
 as the `exconv` command.
@@ -255,12 +255,12 @@ Key options:
 
 Outputs: convolved audio WAV and an impulse visualization PNG in `--out-dir`.
 
-### 6. Bi-directional video convolution (scripts/video_biconv.py)
+### 6. Bi-directional video convolution (`exconv video-biconv`)
 
 Per-frame sound->image and image->sound with parallel/serial chaining. Provide a video for frames and an audio file (can be the original track or external):
 
 ```bash
-python scripts/video_biconv.py \
+exconv video-biconv \
   --video input.mp4 \
   --out-video out_biconv.mp4 \
   --out-audio out_biconv.wav \
@@ -275,7 +275,9 @@ Notable controls:
 - `--serial-mode`: `parallel`, `serial-image-first`, `serial-sound-first`
 - `--audio-length-mode`: `trim`, `pad-zero`, `pad-loop`, `pad-noise`, `center-zero`
 - `--audio`: optional; if omitted, audio is extracted from the input video (ffmpeg required)
+- `--audio` can also point to a video file; audio will be auto-extracted when detected.
 - `--mux/--no-mux`: mux processed audio into output video (default on, requires ffmpeg)
+- `--block-size`: process frames in blocks (e.g. 12/24/50/120/240) so each block shares one audio chunk; audio is convolved from the mean image of that block.
 - Sound->image (`s2i-*`): matches `spectral_sculpt` modes (`mono`, `stereo`, `mid-side`; `luma` or `color`)
 - Image->sound (`i2s-*`): same options as the image2sound demo (flat/hist/radial, colorspace, phase, impulse length)
 - `--fps`: override if video metadata is missing/incorrect
