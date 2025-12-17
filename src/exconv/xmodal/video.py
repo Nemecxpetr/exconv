@@ -6,6 +6,7 @@ from typing import Iterable, List, Sequence, Tuple, Literal, overload, Optional
 import subprocess
 import tempfile
 from io import BytesIO
+import math
 
 import numpy as np
 import soundfile as sf
@@ -36,6 +37,7 @@ __all__ = [
     "sound2image_video_from_files",
     "biconv_video_arrays",
     "biconv_video_from_files",
+    "biconv_video_to_files_stream",
 ]
 
 
@@ -211,6 +213,152 @@ def _match_audio_length(
             np.float32
         )
         return np.concatenate([audio, noise], axis=0)
+
+    raise ValueError(f"Unknown audio length mode: {mode}")
+
+
+def _estimate_total_frames_from_meta(meta: dict, fps: float) -> int | None:
+    """
+    Best-effort estimate of total frames from imageio metadata.
+
+    We intentionally bias upward (ceil) to reduce the risk of under-estimating,
+    which could otherwise truncate audio too early if callers use the estimate.
+    """
+    nframes = meta.get("nframes", None)
+    if isinstance(nframes, (int, np.integer)) and int(nframes) > 0:
+        return int(nframes)
+
+    try:
+        nframes_f = float(nframes)  # may be inf/NaN
+        if math.isfinite(nframes_f) and nframes_f > 0:
+            return int(math.ceil(nframes_f))
+    except (TypeError, ValueError):
+        pass
+
+    dur = meta.get("duration", None)
+    try:
+        dur_f = float(dur)
+    except (TypeError, ValueError):
+        return None
+
+    if dur_f > 0 and fps > 0:
+        return int(max(1, math.ceil(dur_f * fps)))
+    return None
+
+
+def _read_video_meta(path: Path) -> dict:
+    try:
+        import imageio.v3 as iio  # local import to keep import surface small
+
+        meta = iio.immeta(path)
+        return dict(meta) if isinstance(meta, dict) else {}
+    except Exception:
+        return {}
+
+
+def _audio_chunk_for_interval(
+    audio: np.ndarray,
+    start: int,
+    stop: int,
+    *,
+    mode: AudioLengthMode,
+    rng: np.random.Generator,
+    noise_scale: float,
+    center_target_len: int | None = None,
+) -> np.ndarray:
+    """
+    Return audio[start:stop] for a logical timeline, applying padding strategy.
+
+    Unlike `_slice_for_frame`, `start/stop` are NOT clamped to the source audio
+    length. This lets us implement pad/loop/noise without pre-materializing a
+    full-length padded array.
+    """
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim == 1:
+        audio = audio[:, None]
+
+    if stop <= start:
+        return np.zeros((0, audio.shape[1]), dtype=np.float32)
+
+    n_samples, n_ch = audio.shape
+    need = int(stop - start)
+
+    if mode in ("trim", "pad-zero"):
+        # For our use (only requesting within video timeline), trim behaves like
+        # pad-zero: take what exists, and zero-pad past EOF.
+        if n_samples <= 0:
+            return np.zeros((need, n_ch), dtype=np.float32)
+        if start >= n_samples:
+            return np.zeros((need, n_ch), dtype=np.float32)
+        take_end = min(stop, n_samples)
+        head = audio[start:take_end, :]
+        if take_end >= stop:
+            return head.astype(np.float32, copy=False)
+        pad = np.zeros((stop - take_end, n_ch), dtype=np.float32)
+        return np.concatenate([head, pad], axis=0)
+
+    if mode == "pad-loop":
+        if n_samples <= 0:
+            return np.zeros((need, n_ch), dtype=np.float32)
+        out = np.empty((need, n_ch), dtype=np.float32)
+        pos = 0
+        cur = int(start)
+        while pos < need:
+            idx = cur % n_samples
+            take = min(need - pos, n_samples - idx)
+            out[pos : pos + take, :] = audio[idx : idx + take, :]
+            pos += take
+            cur += take
+        return out
+
+    if mode == "pad-noise":
+        if n_samples <= 0:
+            return rng.normal(0.0, noise_scale, size=(need, n_ch)).astype(np.float32)
+        if start >= n_samples:
+            return rng.normal(0.0, noise_scale, size=(need, n_ch)).astype(np.float32)
+        take_end = min(stop, n_samples)
+        head = audio[start:take_end, :]
+        if take_end >= stop:
+            return head.astype(np.float32, copy=False)
+        tail = rng.normal(0.0, noise_scale, size=(stop - take_end, n_ch)).astype(
+            np.float32
+        )
+        return np.concatenate([head, tail], axis=0)
+
+    if mode == "center-zero":
+        if center_target_len is None or center_target_len <= 0:
+            raise ValueError("center-zero requires a valid target duration")
+
+        target = int(center_target_len)
+        if need <= 0:
+            return np.zeros((0, n_ch), dtype=np.float32)
+
+        if n_samples >= target:
+            trim = (n_samples - target) // 2
+            src_start = trim + start
+            src_stop = trim + stop
+            src_start = max(0, min(src_start, n_samples))
+            src_stop = max(src_start, min(src_stop, n_samples))
+            head = audio[src_start:src_stop, :]
+            if head.shape[0] >= need:
+                return head[:need].astype(np.float32, copy=False)
+            pad = np.zeros((need - head.shape[0], n_ch), dtype=np.float32)
+            return np.concatenate([head, pad], axis=0)
+
+        pad_front = (target - n_samples) // 2
+        # Video timeline maps to audio index = t - pad_front
+        out = np.zeros((need, n_ch), dtype=np.float32)
+        src_start = start - pad_front
+        src_stop = stop - pad_front
+        # overlap with audio indices [0, n_samples)
+        a0 = max(0, src_start)
+        a1 = min(n_samples, src_stop)
+        if a1 <= a0:
+            return out
+        o0 = a0 - src_start
+        o1 = o0 + (a1 - a0)
+        out[o0:o1, :] = audio[a0:a1, :]
+        return out
 
     raise ValueError(f"Unknown audio length mode: {mode}")
 
@@ -534,6 +682,10 @@ def biconv_video_arrays(
     serial_mode: DualSerialMode = "parallel",
     audio_length_mode: AudioLengthMode = "pad-zero",
     block_size: int = 1,
+    # s2i color controls
+    s2i_safe_color: bool = True,
+    s2i_chroma_strength: float = 0.5,
+    s2i_chroma_clip: float = 0.25,
 ) -> Tuple[List[np.ndarray], np.ndarray]:
     """
     Convolve video frames and audio with each other per frame.
@@ -555,6 +707,15 @@ def biconv_video_arrays(
         raise ValueError("sr must be > 0")
     if block_size <= 0:
         raise ValueError("block_size must be positive")
+
+    def _to_uint8_frame(img_proc: np.ndarray) -> np.ndarray:
+        arr = np.asarray(img_proc)
+        if np.issubdtype(arr.dtype, np.floating):
+            arr = np.clip(arr, 0.0, 1.0)
+            arr = (arr * 255.0).astype(np.uint8)
+        else:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        return arr
 
     # match audio length to video duration
     ideal_len = int(round(len(frames) * sr / fps))
@@ -585,11 +746,22 @@ def biconv_video_arrays(
         else:
             chunk = audio[start:stop, :]
 
-        # mean image for image->sound branch
-        img_mean = np.mean(np.stack(block_frames, axis=0), axis=0)
+        # mean image for image->sound branch; stream to avoid large stacks and
+        # ensure float32 0..1 so color handling (e.g., YCbCr mid/side) stays valid.
+        img_sum = None
+        for frame_arr in block_frames:
+            arr_f = np.asarray(frame_arr, dtype=np.float32)
+            if arr_f.max() > 1.0:
+                arr_f = arr_f / 255.0
+            if img_sum is None:
+                img_sum = np.zeros_like(arr_f, dtype=np.float32)
+            img_sum += arr_f
+        img_mean = img_sum / len(block_frames) if img_sum is not None else np.zeros(
+            (1,), dtype=np.float32
+        )
 
         # process according to serial mode, but at block granularity
-        block_img_proc: List[np.ndarray] = []
+        block_proc_frames_u8: List[np.ndarray] = []
 
         if serial_mode == "parallel":
             # sound->image uses original frames + shared chunk
@@ -600,9 +772,12 @@ def biconv_video_arrays(
                     sr=sr,
                     mode=s2i_mode,
                     colorspace=s2i_colorspace,
+                    safe_color=s2i_safe_color,
+                    chroma_strength=s2i_chroma_strength,
+                    chroma_clip=s2i_chroma_clip,
                     normalize=True,
                 )
-                block_img_proc.append(img_proc)
+                block_proc_frames_u8.append(_to_uint8_frame(img_proc))
 
             aud_proc = _image2sound_apply(
                 img=img_mean,
@@ -620,6 +795,7 @@ def biconv_video_arrays(
                 smoothing=i2s_smoothing,
             )
         elif serial_mode == "serial-image-first":
+            img_mean_proc_sum = None
             for frame_arr in block_frames:
                 img_proc = spectral_sculpt(
                     image=frame_arr,
@@ -627,11 +803,24 @@ def biconv_video_arrays(
                     sr=sr,
                     mode=s2i_mode,
                     colorspace=s2i_colorspace,
+                    safe_color=s2i_safe_color,
+                    chroma_strength=s2i_chroma_strength,
+                    chroma_clip=s2i_chroma_clip,
                     normalize=True,
                 )
-                block_img_proc.append(img_proc)
+                img_proc_f = np.asarray(img_proc, dtype=np.float32)
+                if img_proc_f.max() > 1.0:
+                    img_proc_f = img_proc_f / 255.0
+                if img_mean_proc_sum is None:
+                    img_mean_proc_sum = np.zeros_like(img_proc_f, dtype=np.float32)
+                img_mean_proc_sum += img_proc_f
+                block_proc_frames_u8.append(_to_uint8_frame(img_proc))
 
-            img_mean_proc = np.mean(np.stack(block_img_proc, axis=0), axis=0)
+            img_mean_proc = (
+                img_mean_proc_sum / len(block_proc_frames_u8)
+                if img_mean_proc_sum is not None and len(block_proc_frames_u8) > 0
+                else img_mean
+            )
 
             aud_proc = _image2sound_apply(
                 img=img_mean_proc,
@@ -671,19 +860,17 @@ def biconv_video_arrays(
                     sr=sr,
                     mode=s2i_mode,
                     colorspace=s2i_colorspace,
+                    safe_color=s2i_safe_color,
+                    chroma_strength=s2i_chroma_strength,
+                    chroma_clip=s2i_chroma_clip,
                     normalize=True,
                 )
-                block_img_proc.append(img_proc)
+                block_proc_frames_u8.append(_to_uint8_frame(img_proc))
         else:
             raise ValueError(f"Unknown serial_mode: {serial_mode}")
 
         # push processed frames
-        for img_proc in block_img_proc:
-            if np.issubdtype(img_proc.dtype, np.floating):
-                frame_u8 = np.clip(img_proc * 255.0, 0.0, 255.0).astype(np.uint8)
-            else:
-                frame_u8 = np.clip(img_proc, 0, 255).astype(np.uint8)
-            processed_frames.append(frame_u8)
+        processed_frames.extend(block_proc_frames_u8)
 
         audio_chunks.append(aud_proc)
 
@@ -713,6 +900,10 @@ def biconv_video_from_files(
     serial_mode: DualSerialMode = "parallel",
     audio_length_mode: AudioLengthMode = "pad-zero",
     block_size: int = 1,
+    block_size_div: int | None = None,
+    s2i_safe_color: bool = True,
+    s2i_chroma_strength: float = 0.5,
+    s2i_chroma_clip: float = 0.25,
     out_video: str | Path | None = None,
     out_audio: str | Path | None = None,
     mux_output: bool = False,
@@ -743,6 +934,12 @@ def biconv_video_from_files(
     else:
         fps_used = float(fps)
 
+    # derive block size from divisor if requested
+    if block_size_div is not None:
+        if block_size_div <= 0:
+            raise ValueError("block_size_div must be positive")
+        block_size = max(1, int(math.ceil(len(frames) / float(block_size_div))))
+
     frames_out, audio_out = biconv_video_arrays(
         frames=frames,
         audio=audio,
@@ -763,6 +960,9 @@ def biconv_video_from_files(
         serial_mode=serial_mode,
         audio_length_mode=audio_length_mode,
         block_size=block_size,
+        s2i_safe_color=s2i_safe_color,
+        s2i_chroma_strength=s2i_chroma_strength,
+        s2i_chroma_clip=s2i_chroma_clip,
     )
 
     temp_video: Path | None = None
@@ -781,9 +981,10 @@ def biconv_video_from_files(
         if out_audio is not None:
             temp_audio = _as_path(out_audio)
         else:
+            import os
+
             fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="biconv_audio_")
-            Path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
-            Path(tmp_path).write_bytes(b"")  # ensure file exists
+            os.close(fd)
             temp_audio = Path(tmp_path)
         temp_audio.parent.mkdir(parents=True, exist_ok=True)
         write_audio(temp_audio, audio_out, sr)
@@ -827,3 +1028,427 @@ def biconv_video_from_files(
             pass
 
     return frames_out, audio_out, fps_used, sr
+
+
+def biconv_video_to_files_stream(
+    video_path: str | Path,
+    audio_path: Optional[str | Path] = None,
+    *,
+    fps: float | None = None,
+    s2i_mode: Mode = "mono",
+    s2i_colorspace: ColorMode = "luma",
+    i2s_mode: Literal["flat", "hist", "radial"] = "radial",
+    i2s_colorspace: Img2SoundColorMode = "luma",
+    i2s_pad_mode: Img2SoundPadMode = "same-center",
+    i2s_impulse_len: int | Literal["auto"] = "auto",
+    i2s_radius_mode: RadiusMode = "linear",
+    i2s_phase_mode: PhaseMode = "zero",
+    i2s_smoothing: SmoothingMode = "hann",
+    i2s_impulse_norm: ImpulseNorm = "energy",
+    i2s_out_norm: OutNorm = "match_rms",
+    i2s_n_bins: int = 256,
+    serial_mode: DualSerialMode = "parallel",
+    audio_length_mode: AudioLengthMode = "pad-zero",
+    block_size: int = 1,
+    block_size_div: int | None = None,
+    s2i_safe_color: bool = True,
+    s2i_chroma_strength: float = 0.5,
+    s2i_chroma_clip: float = 0.25,
+    out_video: str | Path | None = None,
+    out_audio: str | Path | None = None,
+    mux_output: bool = False,
+) -> Tuple[int, Tuple[int, int], float, int]:
+    """
+    Streaming, file-based bi-directional video processor.
+
+    Unlike `biconv_video_from_files`, this does NOT materialize the full frame
+    list or the full output video in memory. It reads frames in blocks and
+    writes video/audio incrementally.
+
+    Returns
+    -------
+    n_frames_written, audio_shape, fps_used, sr
+        audio_shape is (n_samples_written, n_channels). If audio isn't written
+        (no `out_audio` and `mux_output=False`), audio_shape will be (0, 0).
+    """
+    if block_size <= 0:
+        raise ValueError("block_size must be positive")
+
+    video_path = _as_path(video_path)
+    audio_used: Path | None = _as_path(audio_path) if audio_path else None
+
+    # --- audio ---
+    if audio_used is None:
+        audio, sr = _extract_audio_from_video(video_path)
+    else:
+        if _looks_like_video(audio_used):
+            audio, sr = _extract_audio_from_video(audio_used)
+        else:
+            audio, sr = read_audio(audio_used, dtype="float32", always_2d=True)
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim == 1:
+        audio = audio[:, None]
+
+    # --- video metadata (fps/duration) ---
+    meta = _read_video_meta(video_path)
+    meta_fps = meta.get("fps", None)
+
+    if fps is None:
+        if not meta_fps or float(meta_fps) <= 0:
+            raise RuntimeError("Could not determine FPS; pass fps explicitly.")
+        fps_used = float(meta_fps)
+    else:
+        fps_used = float(fps)
+
+    if fps_used <= 0:
+        raise ValueError("fps must be > 0")
+    if sr <= 0:
+        raise ValueError("sr must be > 0")
+
+    # Best-effort estimate (used for progress/center-zero; never used to trim audio)
+    n_frames_est: int | None = _estimate_total_frames_from_meta(meta, fps_used)
+
+    # --- derive block size from divisor if requested ---
+    if block_size_div is not None:
+        if block_size_div <= 0:
+            raise ValueError("block_size_div must be positive")
+        if n_frames_est is None:
+            # fallback: count frames (requires a second decode pass)
+            try:
+                import imageio.v3 as iio  # local import
+
+                n_frames_est = sum(1 for _ in iio.imiter(video_path))
+            except Exception:
+                n_frames_est = None
+        if not n_frames_est or n_frames_est <= 0:
+            raise RuntimeError(
+                "Could not estimate total frame count for --block-size-div; "
+                "use --block-size instead."
+            )
+        block_size = max(1, int(math.ceil(n_frames_est / float(block_size_div))))
+
+    # --- writers / temp paths ---
+    out_video_p: Path | None = _as_path(out_video) if out_video is not None else None
+    out_audio_p: Path | None = _as_path(out_audio) if out_audio is not None else None
+
+    if mux_output and out_video_p is None:
+        raise ValueError("mux_output=True requires out_video to be set.")
+
+    if out_video_p is None and out_audio_p is None and not mux_output:
+        raise ValueError("Nothing to write: pass out_video/out_audio or enable mux_output.")
+
+    temp_video: Path | None = None
+    temp_audio: Path | None = None
+
+    if out_video_p is not None:
+        out_video_p.parent.mkdir(parents=True, exist_ok=True)
+        if mux_output:
+            temp_video = out_video_p.with_name(f"{out_video_p.stem}_tmp_noaudio{out_video_p.suffix}")
+        else:
+            temp_video = out_video_p
+
+    if out_audio_p is not None or mux_output:
+        if out_audio_p is not None:
+            temp_audio = out_audio_p
+        else:
+            import os
+
+            fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="biconv_audio_")
+            os.close(fd)
+            temp_audio = Path(tmp_path)
+        temp_audio.parent.mkdir(parents=True, exist_ok=True)
+
+    # RNG for pad-noise mode
+    rng = np.random.default_rng()
+    rms = float(np.sqrt(np.mean(audio**2))) if audio.size > 0 else 1.0
+    noise_scale = (0.01 * rms) if rms > 0 else 0.01
+
+    # center-zero requires a target duration (best-effort from metadata)
+    center_target_len: int | None = None
+    if audio_length_mode == "center-zero":
+        dur = meta.get("duration", None)
+        try:
+            dur_f = float(dur)
+        except (TypeError, ValueError):
+            dur_f = 0.0
+        if dur_f > 0:
+            center_target_len = int(max(1, round(dur_f * sr)))
+        elif n_frames_est is not None and n_frames_est > 0:
+            center_target_len = int(max(1, round(n_frames_est * sr / fps_used)))
+        else:
+            # Last resort: count frames to get a target duration.
+            try:
+                import imageio.v3 as iio  # local import
+
+                n_frames_est = sum(1 for _ in iio.imiter(video_path))
+            except Exception:
+                n_frames_est = None
+
+            if n_frames_est is not None and n_frames_est > 0:
+                center_target_len = int(max(1, round(n_frames_est * sr / fps_used)))
+            else:
+                center_target_len = int(audio.shape[0])
+
+    # Progress bar: estimate blocks if we have an estimate
+    n_blocks_est: int | None = None
+    if n_frames_est is not None and n_frames_est > 0:
+        n_blocks_est = int((n_frames_est + block_size - 1) // block_size)
+
+    def _to_uint8_frame(img_proc: np.ndarray) -> np.ndarray:
+        arr = np.asarray(img_proc)
+        if np.issubdtype(arr.dtype, np.floating):
+            arr = np.clip(arr, 0.0, 1.0)
+            arr = (arr * 255.0).astype(np.uint8)
+        else:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        return arr
+
+    n_frames_written = 0
+    audio_samples_written = 0
+    audio_channels_written = 0
+
+    # Open video writer if requested
+    video_writer = None
+    if temp_video is not None:
+        import imageio
+
+        video_writer = imageio.get_writer(str(temp_video), fps=fps_used, macro_block_size=None)
+
+    # Open audio writer lazily once we know output channels
+    audio_writer: sf.SoundFile | None = None
+
+    try:
+        import imageio.v3 as iio
+
+        frame_iter = iio.imiter(video_path)
+        block_iter = tqdm(
+            total=n_blocks_est,
+            desc="bi-conv video blocks",
+            unit="block",
+        )
+
+        block_start = 0
+        while True:
+            # read frames for this block
+            block_frames: list[np.ndarray] = []
+            for _ in range(block_size):
+                try:
+                    f = next(frame_iter)
+                except StopIteration:
+                    break
+                block_frames.append(np.asarray(f))
+
+            if not block_frames:
+                break
+
+            block_end = block_start + len(block_frames) - 1
+
+            # map frame interval -> audio interval (unclamped)
+            start_s = int(round(block_start * sr / fps_used))
+            stop_s = int(round((block_end + 1) * sr / fps_used))
+            if stop_s <= start_s:
+                stop_s = start_s + max(1, int(round(len(block_frames) * sr / fps_used)))
+
+            chunk = _audio_chunk_for_interval(
+                audio,
+                start_s,
+                stop_s,
+                mode=audio_length_mode,
+                rng=rng,
+                noise_scale=noise_scale,
+                center_target_len=center_target_len,
+            )
+
+            # mean image for image->sound branch (float32 0..1)
+            img_sum = None
+            for frame_arr in block_frames:
+                arr_f = np.asarray(frame_arr, dtype=np.float32)
+                if arr_f.max() > 1.0:
+                    arr_f = arr_f / 255.0
+                if img_sum is None:
+                    img_sum = np.zeros_like(arr_f, dtype=np.float32)
+                img_sum += arr_f
+            img_mean = img_sum / len(block_frames) if img_sum is not None else np.zeros((1,), dtype=np.float32)
+
+            if serial_mode == "parallel":
+                for frame_arr in block_frames:
+                    img_proc = spectral_sculpt(
+                        image=frame_arr,
+                        audio=chunk,
+                        sr=sr,
+                        mode=s2i_mode,
+                        colorspace=s2i_colorspace,
+                        safe_color=s2i_safe_color,
+                        chroma_strength=s2i_chroma_strength,
+                        chroma_clip=s2i_chroma_clip,
+                        normalize=True,
+                    )
+                    frame_u8 = _to_uint8_frame(img_proc)
+                    if video_writer is not None:
+                        video_writer.append_data(frame_u8)
+                    n_frames_written += 1
+
+                aud_proc = _image2sound_apply(
+                    img=img_mean,
+                    audio=chunk,
+                    sr=sr,
+                    mode=i2s_mode,
+                    pad_mode=i2s_pad_mode,
+                    colorspace=i2s_colorspace,
+                    impulse_norm=i2s_impulse_norm,
+                    out_norm=i2s_out_norm,
+                    impulse_len=i2s_impulse_len,
+                    n_bins=i2s_n_bins,
+                    radius_mode=i2s_radius_mode,
+                    phase_mode=i2s_phase_mode,
+                    smoothing=i2s_smoothing,
+                )
+            elif serial_mode == "serial-image-first":
+                img_mean_proc_sum = None
+                for frame_arr in block_frames:
+                    img_proc = spectral_sculpt(
+                        image=frame_arr,
+                        audio=chunk,
+                        sr=sr,
+                        mode=s2i_mode,
+                        colorspace=s2i_colorspace,
+                        safe_color=s2i_safe_color,
+                        chroma_strength=s2i_chroma_strength,
+                        chroma_clip=s2i_chroma_clip,
+                        normalize=True,
+                    )
+                    img_proc_f = np.asarray(img_proc, dtype=np.float32)
+                    if img_proc_f.max() > 1.0:
+                        img_proc_f = img_proc_f / 255.0
+                    if img_mean_proc_sum is None:
+                        img_mean_proc_sum = np.zeros_like(img_proc_f, dtype=np.float32)
+                    img_mean_proc_sum += img_proc_f
+
+                    frame_u8 = _to_uint8_frame(img_proc)
+                    if video_writer is not None:
+                        video_writer.append_data(frame_u8)
+                    n_frames_written += 1
+
+                img_mean_proc = (
+                    img_mean_proc_sum / len(block_frames)
+                    if img_mean_proc_sum is not None and len(block_frames) > 0
+                    else img_mean
+                )
+
+                aud_proc = _image2sound_apply(
+                    img=img_mean_proc,
+                    audio=chunk,
+                    sr=sr,
+                    mode=i2s_mode,
+                    pad_mode=i2s_pad_mode,
+                    colorspace=i2s_colorspace,
+                    impulse_norm=i2s_impulse_norm,
+                    out_norm=i2s_out_norm,
+                    impulse_len=i2s_impulse_len,
+                    n_bins=i2s_n_bins,
+                    radius_mode=i2s_radius_mode,
+                    phase_mode=i2s_phase_mode,
+                    smoothing=i2s_smoothing,
+                )
+            elif serial_mode == "serial-sound-first":
+                aud_proc = _image2sound_apply(
+                    img=img_mean,
+                    audio=chunk,
+                    sr=sr,
+                    mode=i2s_mode,
+                    pad_mode=i2s_pad_mode,
+                    colorspace=i2s_colorspace,
+                    impulse_norm=i2s_impulse_norm,
+                    out_norm=i2s_out_norm,
+                    impulse_len=i2s_impulse_len,
+                    n_bins=i2s_n_bins,
+                    radius_mode=i2s_radius_mode,
+                    phase_mode=i2s_phase_mode,
+                    smoothing=i2s_smoothing,
+                )
+                for frame_arr in block_frames:
+                    img_proc = spectral_sculpt(
+                        image=frame_arr,
+                        audio=aud_proc,
+                        sr=sr,
+                        mode=s2i_mode,
+                        colorspace=s2i_colorspace,
+                        safe_color=s2i_safe_color,
+                        chroma_strength=s2i_chroma_strength,
+                        chroma_clip=s2i_chroma_clip,
+                        normalize=True,
+                    )
+                    frame_u8 = _to_uint8_frame(img_proc)
+                    if video_writer is not None:
+                        video_writer.append_data(frame_u8)
+                    n_frames_written += 1
+            else:
+                raise ValueError(f"Unknown serial_mode: {serial_mode}")
+
+            # write audio chunk if requested
+            if temp_audio is not None:
+                if aud_proc.ndim == 1:
+                    aud_proc = aud_proc[:, None]
+                if audio_writer is None:
+                    audio_channels_written = int(aud_proc.shape[1])
+                    audio_writer = sf.SoundFile(
+                        str(temp_audio),
+                        mode="w",
+                        samplerate=int(sr),
+                        channels=audio_channels_written,
+                        subtype="PCM_16",
+                    )
+                to_write = np.asarray(aud_proc, dtype=np.float32)
+                to_write = np.clip(to_write, -1.0, 1.0)
+                audio_writer.write(to_write)
+                audio_samples_written += int(aud_proc.shape[0])
+
+            block_start = block_end + 1
+            block_iter.update(1)
+
+        block_iter.close()
+    finally:
+        if video_writer is not None:
+            video_writer.close()
+        if audio_writer is not None:
+            audio_writer.close()
+
+    # mux if requested
+    if mux_output and out_video_p is not None and temp_video is not None and temp_audio is not None:
+        if not _ffmpeg_available():
+            raise RuntimeError("mux_output requested but ffmpeg not available on PATH")
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(temp_video),
+            "-i",
+            str(temp_audio),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "256k",
+            "-movflags",
+            "+faststart",
+            str(out_video_p),
+        ]
+        subprocess.run(cmd, check=True)
+        try:
+            temp_video.unlink(missing_ok=True)
+            if out_audio_p is None:
+                temp_audio.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    audio_shape = (
+        (audio_samples_written, audio_channels_written)
+        if temp_audio is not None
+        else (0, 0)
+    )
+    return n_frames_written, audio_shape, fps_used, sr

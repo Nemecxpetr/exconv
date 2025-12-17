@@ -21,6 +21,7 @@ from .video import (
     AudioVideoMode,
     biconv_video_arrays,
     biconv_video_from_files,
+    biconv_video_to_files_stream,
     DualSerialMode,
     AudioLengthMode,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "AudioVideoMode",
     "biconv_video_arrays",
     "biconv_video_from_files",
+    "biconv_video_to_files_stream",
     "DualSerialMode",
     "AudioLengthMode",
 ]

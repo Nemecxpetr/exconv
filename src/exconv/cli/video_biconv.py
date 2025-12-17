@@ -4,7 +4,7 @@ from pathlib import Path
 import argparse
 
 from exconv.xmodal import (
-    biconv_video_from_files,
+    biconv_video_to_files_stream,
     DualSerialMode,
     AudioLengthMode,
 )
@@ -44,6 +44,7 @@ def run_video_biconv(
     serial_mode: DualSerialMode,
     audio_length_mode: AudioLengthMode,
     block_size: int,
+    block_size_div: int | None,
     s2i_mode: str,
     s2i_colorspace: str,
     i2s_mode: str,
@@ -56,18 +57,24 @@ def run_video_biconv(
     i2s_impulse_norm: str,
     i2s_out_norm: str,
     i2s_n_bins: int,
+    s2i_safe_color: bool,
+    s2i_chroma_strength: float,
+    s2i_chroma_clip: float,
 ) -> int:
     """
     Execute bi-directional video convolution and print a short summary.
     """
     impulse_len_resolved = _coerce_impulse_len_runtime(i2s_impulse_len)
 
-    frames_out, audio_out, fps_used, sr = biconv_video_from_files(
+    n_frames, audio_shape, fps_used, sr = biconv_video_to_files_stream(
         video_path=video_path,
         audio_path=audio_path,
         fps=fps,
         s2i_mode=s2i_mode,  # type: ignore[arg-type]
         s2i_colorspace=s2i_colorspace,  # type: ignore[arg-type]
+        s2i_safe_color=s2i_safe_color,
+        s2i_chroma_strength=s2i_chroma_strength,
+        s2i_chroma_clip=s2i_chroma_clip,
         i2s_mode=i2s_mode,  # type: ignore[arg-type]
         i2s_colorspace=i2s_colorspace,  # type: ignore[arg-type]
         i2s_pad_mode=i2s_pad_mode,  # type: ignore[arg-type]
@@ -81,16 +88,17 @@ def run_video_biconv(
         serial_mode=serial_mode,
         audio_length_mode=audio_length_mode,
         block_size=block_size,
+        block_size_div=block_size_div,
         out_video=out_video,
         out_audio=out_audio,
         mux_output=mux,
     )
 
-    print(f"[done] wrote video {out_video} @ {fps_used:.3f} fps ({len(frames_out)} frames)")
+    print(f"[done] wrote video {out_video} @ {fps_used:.3f} fps ({n_frames} frames)")
     if out_audio:
-        print(f"[done] wrote audio {out_audio} (shape={audio_out.shape}, sr={sr})")
+        print(f"[done] wrote audio {out_audio} (shape={audio_shape}, sr={sr})")
     elif mux:
-        print(f"[done] audio muxed into {out_video} (shape={audio_out.shape}, sr={sr})")
+        print(f"[done] audio muxed into {out_video} (shape={audio_shape}, sr={sr})")
 
     return 0
 
@@ -164,6 +172,12 @@ def register_video_biconv_subcommand(subparsers: argparse._SubParsersAction) -> 
         default=1,
         help="Process frames in blocks of this size (e.g. 12, 24, 50, 120...) using the same audio chunk.",
     )
+    p.add_argument(
+        "--block-size-div",
+        type=int,
+        default=None,
+        help="Alternative: split the video into N blocks (divisor). 1 = whole video as one block, 2 = halves, etc. Overrides --block-size when set.",
+    )
     # sound->image
     p.add_argument(
         "--s2i-mode",
@@ -176,6 +190,24 @@ def register_video_biconv_subcommand(subparsers: argparse._SubParsersAction) -> 
         choices=["luma", "color"],
         default="luma",
         help="Sound->image colorspace.",
+    )
+    p.add_argument(
+        "--s2i-safe-color/--s2i-unsafe-color",
+        dest="s2i_safe_color",
+        default=True,
+        help="Enable chroma-safe normalization in color mode.",
+    )
+    p.add_argument(
+        "--s2i-chroma-strength",
+        type=float,
+        default=0.5,
+        help="Blend between original chroma (0.0) and fully filtered chroma (1.0) in color mode.",
+    )
+    p.add_argument(
+        "--s2i-chroma-clip",
+        type=float,
+        default=0.25,
+        help="Max chroma deviation around 0.5 when safe-color is enabled.",
     )
     # image->sound
     p.add_argument(
@@ -258,6 +290,7 @@ def _cmd_video_biconv(args: argparse.Namespace) -> int:
         serial_mode=args.serial_mode,
         audio_length_mode=args.audio_length_mode,
         block_size=args.block_size,
+        block_size_div=args.block_size_div,
         s2i_mode=args.s2i_mode,
         s2i_colorspace=args.s2i_colorspace,
         i2s_mode=args.i2s_mode,
@@ -270,4 +303,7 @@ def _cmd_video_biconv(args: argparse.Namespace) -> int:
         i2s_impulse_norm=args.i2s_impulse_norm,
         i2s_out_norm=args.i2s_out_norm,
         i2s_n_bins=args.i2s_n_bins,
+        s2i_safe_color=args.s2i_safe_color,
+        s2i_chroma_strength=args.s2i_chroma_strength,
+        s2i_chroma_clip=args.s2i_chroma_clip,
     )
