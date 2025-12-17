@@ -236,8 +236,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--block-size-div",
         type=int,
-        default=9,
-        help="Split video into N blocks (default: 9).",
+        default=12,
+        help="Split video into N blocks (default: 12).",
     )
     p.add_argument(
         "--s2i-mode",
