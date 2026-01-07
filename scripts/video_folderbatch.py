@@ -14,6 +14,14 @@ and writes:
 
     samples/output/video/<project>/*
 
+With --variants all, it renders three outputs per input:
+- <name><suffix><ext>              (video + audio processed)
+- <name><suffix>_video<ext>        (video processed, original audio)
+- <name><suffix>_audio<ext>        (original video, audio processed)
+
+Use --out-project to send outputs to a different subfolder under
+samples/output/video while keeping inputs under <project>.
+
 By default it runs the equivalent pipeline for each input video:
 
     exconv video-biconv
@@ -24,9 +32,10 @@ By default it runs the equivalent pipeline for each input video:
       --i2s-mode radial
       --i2s-colorspace ycbcr-mid-side
       --i2s-phase-mode spiral
-      --i2s-impulse-len auto
+      --i2s-impulse-len frame
       --serial-mode parallel
-      --block-size-div 9
+      --block-size 1
+      --block-size-div 12
 
 Notes on performance
 --------------------
@@ -44,6 +53,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
+import subprocess
 
 
 VIDEO_EXTS = {
@@ -95,12 +105,16 @@ def _set_thread_env(n: int) -> None:
 class JobSpec:
     video_path: Path
     audio_path: Optional[Path]
-    out_video: Path
+    out_main: Path
+    out_video_only: Optional[Path]
+    out_audio_only: Optional[Path]
+    tmp_video: Path
+    tmp_audio: Path
     fps: Optional[float]
-    mux: bool
     # requested pipeline defaults
     serial_mode: str
-    block_size_div: int
+    block_size: int
+    block_size_div: Optional[int]
     s2i_mode: str
     s2i_colorspace: str
     s2i_safe_color: bool
@@ -110,6 +124,37 @@ class JobSpec:
     i2s_colorspace: str
     i2s_phase_mode: str
     i2s_impulse_len: str
+    audio_source_for_video_only: Path
+    write_main: bool
+    write_video_only: bool
+    write_audio_only: bool
+
+
+def _mux(video_src: Path, audio_src: Path, out_path: Path, *, copy_audio: bool = False) -> None:
+    """
+    Lightweight mux helper; copy video stream, optionally copy audio.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_src),
+        "-i",
+        str(audio_src),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+    ]
+    if copy_audio:
+        cmd += ["-c:a", "copy"]
+    else:
+        cmd += ["-c:a", "aac", "-b:a", "256k"]
+    cmd += ["-movflags", "+faststart", str(out_path)]
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
@@ -123,13 +168,13 @@ def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
         run_video_biconv(
             video_path=spec.video_path,
             audio_path=spec.audio_path,
-            out_video=spec.out_video,
-            out_audio=None,
+            out_video=spec.tmp_video,
+            out_audio=spec.tmp_audio,
             fps=spec.fps,
-            mux=spec.mux,
+            mux=False,
             serial_mode=spec.serial_mode,  # type: ignore[arg-type]
             audio_length_mode="pad-zero",  # fixed default for this batch script
-            block_size=1,
+            block_size=spec.block_size,
             block_size_div=spec.block_size_div,
             s2i_mode=spec.s2i_mode,
             s2i_colorspace=spec.s2i_colorspace,
@@ -147,6 +192,29 @@ def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
             s2i_chroma_strength=spec.s2i_chroma_strength,
             s2i_chroma_clip=spec.s2i_chroma_clip,
         )
+
+        # Render variants (render-only, reuse processed video/audio)
+        if spec.write_main:
+            _mux(spec.tmp_video, spec.tmp_audio, spec.out_main, copy_audio=False)
+        if spec.out_video_only is not None and spec.write_video_only:
+            _mux(
+                spec.tmp_video,
+                spec.audio_source_for_video_only,
+                spec.out_video_only,
+                copy_audio=True,
+            )
+        if spec.out_audio_only is not None and spec.write_audio_only:
+            _mux(
+                spec.video_path,
+                spec.tmp_audio,
+                spec.out_audio_only,
+                copy_audio=False,
+            )
+        for tmp in (spec.tmp_video, spec.tmp_audio):
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
     except Exception as exc:
         return False, f"{spec.video_path.name}: {exc}", time.perf_counter() - start
     return True, spec.video_path.name, time.perf_counter() - start
@@ -166,6 +234,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--root",
         default="samples",
         help='Root folder (default: "samples").',
+    )
+    p.add_argument(
+        "--out-project",
+        default=None,
+        help=(
+            "Optional project path for outputs under <root>/output/video/<out-project>. "
+            "If omitted, defaults to the same value as --project."
+        ),
     )
     p.add_argument(
         "--recursive",
@@ -218,13 +294,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override FPS if metadata missing/incorrect.",
     )
-    p.add_argument(
-        "--no-mux",
-        dest="mux",
-        action="store_false",
-        help="Disable muxing processed audio into the output video.",
-    )
-    p.set_defaults(mux=True)
 
     # pipeline options (default to the requested settings)
     p.add_argument(
@@ -232,6 +301,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["parallel", "serial-image-first", "serial-sound-first"],
         default="parallel",
         help="Bi-conv chaining mode.",
+    )
+    p.add_argument(
+        "--block-size",
+        type=int,
+        default=None,
+        help="Process frames in fixed-size blocks (overrides --block-size-div when set).",
     )
     p.add_argument(
         "--block-size-div",
@@ -290,8 +365,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--i2s-impulse-len",
-        default="auto",
-        help="Impulse length (integer or 'auto').",
+        default="frame",
+        help="Impulse length (integer, 'auto', or 'frame'=one frame's worth of samples).",
+    )
+    p.add_argument(
+        "--variants",
+        choices=["both", "all"],
+        default="both",
+        help=(
+            "both: only the main processed video; all: also render video-only "
+            "(original audio) and audio-only (original video) variants."
+        ),
     )
 
     return p
@@ -302,7 +386,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.jobs <= 0:
         raise SystemExit("--jobs must be positive")
-    if args.block_size_div <= 0:
+    if args.block_size is not None and args.block_size <= 0:
+        raise SystemExit("--block-size must be positive")
+    if args.block_size_div is not None and args.block_size_div <= 0:
         raise SystemExit("--block-size-div must be positive")
 
     if args.blas_threads is not None:
@@ -310,10 +396,14 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("--blas-threads must be positive")
         _set_thread_env(args.blas_threads)
 
+    block_size = int(args.block_size) if args.block_size is not None else 1
+    block_size_div = None if args.block_size is not None else int(args.block_size_div)
+
     root = _path(args.root)
     project = args.project
+    out_project = args.out_project or project
     in_dir = root / "input" / "video" / project
-    out_dir = root / "output" / "video" / project
+    out_dir = root / "output" / "video" / out_project
     out_dir.mkdir(parents=True, exist_ok=True)
 
     audio_path = _path(args.audio) if args.audio else None
@@ -326,22 +416,42 @@ def main(argv: list[str] | None = None) -> int:
     specs: list[JobSpec] = []
     skipped = 0
     for vp in videos:
-        out_name = f"{vp.stem}{args.suffix}{vp.suffix}"
-        out_video = out_dir / out_name
+        base = f"{vp.stem}{args.suffix}"
+        out_main = out_dir / f"{base}{vp.suffix}"
+        out_video_only = out_dir / f"{base}_video{vp.suffix}" if args.variants == "all" else None
+        out_audio_only = out_dir / f"{base}_audio{vp.suffix}" if args.variants == "all" else None
 
-        if out_video.exists() and not args.overwrite:
+        targets = [out_main]
+        if out_video_only is not None:
+            targets.append(out_video_only)
+        if out_audio_only is not None:
+            targets.append(out_audio_only)
+
+        if all(t.exists() for t in targets) and not args.overwrite:
             skipped += 1
             continue
+
+        tmp_video = out_dir / f"{base}__proc_video{vp.suffix}"
+        tmp_audio = out_dir / f"{base}__proc_audio.wav"
+
+        audio_src_for_video_only = _path(args.audio) if args.audio else vp
+        write_main = args.overwrite or not out_main.exists()
+        write_video_only = args.overwrite or (out_video_only is not None and not out_video_only.exists())
+        write_audio_only = args.overwrite or (out_audio_only is not None and not out_audio_only.exists())
 
         specs.append(
             JobSpec(
                 video_path=vp,
                 audio_path=audio_path,
-                out_video=out_video,
+                out_main=out_main,
+                out_video_only=out_video_only,
+                out_audio_only=out_audio_only,
+                tmp_video=tmp_video,
+                tmp_audio=tmp_audio,
                 fps=args.fps,
-                mux=bool(args.mux),
                 serial_mode=args.serial_mode,
-                block_size_div=args.block_size_div,
+                block_size=block_size,
+                block_size_div=block_size_div,
                 s2i_mode=args.s2i_mode,
                 s2i_colorspace=args.s2i_colorspace,
                 s2i_safe_color=bool(args.s2i_safe_color),
@@ -351,17 +461,30 @@ def main(argv: list[str] | None = None) -> int:
                 i2s_colorspace=args.i2s_colorspace,
                 i2s_phase_mode=args.i2s_phase_mode,
                 i2s_impulse_len=str(args.i2s_impulse_len),
+                audio_source_for_video_only=audio_src_for_video_only,
+                write_main=write_main,
+                write_video_only=write_video_only,
+                write_audio_only=write_audio_only,
             )
         )
 
     print(f"[config] in_dir={in_dir}")
     print(f"[config] out_dir={out_dir}")
     print(f"[config] found={len(videos)} queued={len(specs)} skipped={skipped}")
-    print(f"[config] jobs={args.jobs} mux={args.mux} block_size_div={args.block_size_div}")
+    print(
+        f"[config] jobs={args.jobs} variants={args.variants} "
+        f"block_size={block_size} block_size_div={block_size_div}"
+    )
 
     if args.dry_run:
         for spec in specs:
-            print(f"[dry-run] {spec.video_path.name} -> {spec.out_video.name}")
+            outs = [spec.out_main]
+            if spec.out_video_only:
+                outs.append(spec.out_video_only)
+            if spec.out_audio_only:
+                outs.append(spec.out_audio_only)
+            outs_str = ", ".join(p.name for p in outs)
+            print(f"[dry-run] {spec.video_path.name} -> {outs_str}")
         return 0
 
     ok = 0
@@ -396,4 +519,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

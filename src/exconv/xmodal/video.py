@@ -671,7 +671,7 @@ def biconv_video_arrays(
     i2s_mode: Literal["flat", "hist", "radial"] = "radial",
     i2s_colorspace: Img2SoundColorMode = "luma",
     i2s_pad_mode: Img2SoundPadMode = "same-center",
-    i2s_impulse_len: int | Literal["auto"] = "auto",
+    i2s_impulse_len: int | Literal["auto", "frame"] = "auto",
     i2s_radius_mode: RadiusMode = "linear",
     i2s_phase_mode: PhaseMode = "zero",
     i2s_smoothing: SmoothingMode = "hann",
@@ -707,6 +707,12 @@ def biconv_video_arrays(
         raise ValueError("sr must be > 0")
     if block_size <= 0:
         raise ValueError("block_size must be positive")
+
+    # If requested, resolve impulse length to the duration of a single frame.
+    # This keeps memory stable even when block_size grows, and better matches an
+    # "instantaneous per-frame" interpretation.
+    if i2s_impulse_len == "frame":
+        i2s_impulse_len = max(1, int(round(sr / fps)))
 
     def _to_uint8_frame(img_proc: np.ndarray) -> np.ndarray:
         arr = np.asarray(img_proc)
@@ -890,7 +896,7 @@ def biconv_video_from_files(
     i2s_mode: Literal["flat", "hist", "radial"] = "radial",
     i2s_colorspace: Img2SoundColorMode = "luma",
     i2s_pad_mode: Img2SoundPadMode = "same-center",
-    i2s_impulse_len: int | Literal["auto"] = "auto",
+    i2s_impulse_len: int | Literal["auto", "frame"] = "auto",
     i2s_radius_mode: RadiusMode = "linear",
     i2s_phase_mode: PhaseMode = "zero",
     i2s_smoothing: SmoothingMode = "hann",
@@ -1040,7 +1046,7 @@ def biconv_video_to_files_stream(
     i2s_mode: Literal["flat", "hist", "radial"] = "radial",
     i2s_colorspace: Img2SoundColorMode = "luma",
     i2s_pad_mode: Img2SoundPadMode = "same-center",
-    i2s_impulse_len: int | Literal["auto"] = "auto",
+    i2s_impulse_len: int | Literal["auto", "frame"] = "auto",
     i2s_radius_mode: RadiusMode = "linear",
     i2s_phase_mode: PhaseMode = "zero",
     i2s_smoothing: SmoothingMode = "hann",
@@ -1104,6 +1110,9 @@ def biconv_video_to_files_stream(
         raise ValueError("fps must be > 0")
     if sr <= 0:
         raise ValueError("sr must be > 0")
+
+    if i2s_impulse_len == "frame":
+        i2s_impulse_len = max(1, int(round(sr / fps_used)))
 
     # Best-effort estimate (used for progress/center-zero; never used to trim audio)
     n_frames_est: int | None = _estimate_total_frames_from_meta(meta, fps_used)

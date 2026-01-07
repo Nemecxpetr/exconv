@@ -15,22 +15,24 @@ def _path(p: str | Path) -> Path:
 
 
 def _parse_impulse_len(val: str) -> str:
-    if val == "auto":
+    if val in ("auto", "frame"):
         return val
     try:
         int(val)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("i2s-impulse-len must be integer or 'auto'") from exc
+        raise argparse.ArgumentTypeError(
+            "i2s-impulse-len must be integer, 'auto', or 'frame'"
+        ) from exc
     return val
 
 
 def _coerce_impulse_len_runtime(val: str) -> int | str:
-    if val == "auto":
-        return "auto"
+    if val in ("auto", "frame"):
+        return val
     try:
         return int(val)
     except ValueError as exc:
-        raise ValueError("i2s-impulse-len must be integer or 'auto'") from exc
+        raise ValueError("i2s-impulse-len must be integer, 'auto', or 'frame'") from exc
 
 
 def run_video_biconv(
@@ -192,10 +194,17 @@ def register_video_biconv_subcommand(subparsers: argparse._SubParsersAction) -> 
         help="Sound->image colorspace.",
     )
     p.add_argument(
-        "--s2i-safe-color/--s2i-unsafe-color",
+        "--s2i-safe-color",
         dest="s2i_safe_color",
+        action="store_true",
         default=True,
         help="Enable chroma-safe normalization in color mode.",
+    )
+    p.add_argument(
+        "--s2i-unsafe-color",
+        dest="s2i_safe_color",
+        action="store_false",
+        help="Disable chroma-safe normalization in color mode.",
     )
     p.add_argument(
         "--s2i-chroma-strength",
@@ -232,7 +241,7 @@ def register_video_biconv_subcommand(subparsers: argparse._SubParsersAction) -> 
         "--i2s-impulse-len",
         type=_parse_impulse_len,
         default="auto",
-        help="Impulse length (int or 'auto'=match audio chunk).",
+        help="Impulse length (int, 'auto'=match audio chunk, 'frame'=one frame's worth of samples).",
     )
     p.add_argument(
         "--i2s-radius-mode",

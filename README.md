@@ -310,6 +310,8 @@ Outputs: processed video and audio files written to the given paths.
   color handling, cross-modal mapping.
 - **API reference**: [`docs/api.md`](docs/api.md) — signatures and parameter
   semantics.
+- **Scripts**: [`docs/scripts.md`](docs/scripts.md) — batch runners and helper
+  CLI usage.
 - **Changelog**: [`CHANGELOG.md`](CHANGELOG.md) — latest additions.
 
 ---
