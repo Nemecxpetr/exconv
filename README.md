@@ -271,16 +271,52 @@ exconv video-biconv \
   --i2s-phase-mode spiral --i2s-impulse-len auto
 ```
 
-Notable controls:
-- `--serial-mode`: `parallel`, `serial-image-first`, `serial-sound-first`
-- `--audio-length-mode`: `trim`, `pad-zero`, `pad-loop`, `pad-noise`, `center-zero`
-- `--audio`: optional; if omitted, audio is extracted from the input video (ffmpeg required)
-- `--audio` can also point to a video file; audio will be auto-extracted when detected.
-- `--mux/--no-mux`: mux processed audio into output video (default on, requires ffmpeg)
-- `--block-size`: process frames in blocks (e.g. 12/24/50/120/240) so each block shares one audio chunk; audio is convolved from the mean image of that block.
-- Sound->image (`s2i-*`): matches `spectral_sculpt` modes (`mono`, `stereo`, `mid-side`; `luma` or `color`)
-- Image->sound (`i2s-*`): same options as the image2sound demo (flat/hist/radial, colorspace, phase, impulse length)
-- `--fps`: override if video metadata is missing/incorrect
+Core controls:
+
+| Option | Default | Notes |
+|--------|---------|-------|
+| `--audio` | None | If omitted, audio is extracted from input video (ffmpeg required). Can also be a video path. |
+| `--fps` | None | Override FPS if metadata is missing/incorrect. |
+| `--fps-policy` | `auto` | How FPS is chosen when `--fps` is unset (`auto`, `metadata`, `avg_frame_rate`, `r_frame_rate`). |
+| `--mux/--no-mux` | `--mux` | Mux processed audio into output video (requires ffmpeg). |
+| `--serial-mode` | `parallel` | `parallel`, `serial-image-first`, `serial-sound-first`. |
+| `--audio-length-mode` | `pad-zero` | See strategies table below. |
+
+Block segmentation:
+
+| Option | Default | Notes |
+|--------|---------|-------|
+| `--block-strategy` | `fixed` | `fixed` (frame-count), `beats`/`novelty`/`structure` (audio-driven). |
+| `--block-size` | `1` | Fixed frames per block (fixed strategy only). |
+| `--block-size-div` | None | Split into N blocks (fixed strategy only). |
+| `--block-min-frames` | `1` | Minimum block length (audio-driven strategies). |
+| `--block-max-frames` | None | Maximum block length (audio-driven strategies). |
+| `--beats-per-block` | `1` | Group this many beats into a single block (beats strategy). |
+
+Sound->image (`s2i-*`):
+
+| Option | Values | Notes |
+|--------|--------|-------|
+| `--s2i-mode` | `mono`, `stereo`, `mid-side` | Matches `spectral_sculpt` modes. |
+| `--s2i-colorspace` | `luma`, `color` | Sound->image colorspace. |
+| `--s2i-safe-color/--s2i-unsafe-color` | flag | Chroma-safe filtering toggle. |
+| `--s2i-chroma-strength` | float | Chroma safety blend strength. |
+| `--s2i-chroma-clip` | float | Max chroma deviation around 0.5 when safe-color is on. |
+
+Image->sound (`i2s-*`):
+
+| Option | Values | Notes |
+|--------|--------|-------|
+| `--i2s-mode` | `flat`, `hist`, `radial` | Impulse generation mode. |
+| `--i2s-colorspace` | `luma`, `rgb-mean`, `rgb-stereo`, `ycbcr-mid-side` | Colorspace for impulse derivation. |
+| `--i2s-pad-mode` | `same-center`, `same-first`, `full` | Convolution pad mode. |
+| `--i2s-impulse-len` | `int`, `auto`, `frame` | `auto` matches audio chunk; `frame` uses one frame duration. |
+| `--i2s-radius-mode` | `linear`, `log` | Radial binning mode (radial). |
+| `--i2s-phase-mode` | `zero`, `random`, `image`, `min-phase`, `spiral` | Phase strategy (radial). |
+| `--i2s-smoothing` | `none`, `hann` | Radial smoothing. |
+| `--i2s-impulse-norm` | `energy`, `peak`, `none` | Impulse normalization. |
+| `--i2s-out-norm` | `match_rms`, `match_peak`, `none` | Output normalization. |
+| `--i2s-n-bins` | int | Histogram bins (hist mode). |
 
 Bi-conv modes (serial/parallel):
 

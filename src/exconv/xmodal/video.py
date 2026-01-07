@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple, Literal, overload, Optional
+import json
 import subprocess
 import tempfile
 from io import BytesIO
@@ -30,9 +31,11 @@ from .image2sound import (
 
 
 AudioVideoMode = Literal["per-buffer-auto", "original"]
+BlockStrategy = Literal["fixed", "beats", "novelty", "structure"]
 
 __all__ = [
     "AudioVideoMode",
+    "BlockStrategy",
     "sound2image_video_arrays",
     "sound2image_video_from_files",
     "biconv_video_arrays",
@@ -57,6 +60,170 @@ def _ffmpeg_available() -> bool:
     except (OSError, FileNotFoundError):
         return False
 
+
+_FFPROBE_AVAILABLE: bool | None = None
+_FPS_GUARD_RATIO = 1.2
+
+FPSPolicy = Literal["auto", "metadata", "avg_frame_rate", "r_frame_rate"]
+
+
+def _ffprobe_available() -> bool:
+    global _FFPROBE_AVAILABLE
+    if _FFPROBE_AVAILABLE is not None:
+        return _FFPROBE_AVAILABLE
+    try:
+        subprocess.run(
+            ["ffprobe", "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        _FFPROBE_AVAILABLE = True
+    except (OSError, FileNotFoundError):
+        _FFPROBE_AVAILABLE = False
+    return _FFPROBE_AVAILABLE
+
+
+def _parse_fraction(val: object) -> Optional[float]:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    text = str(val).strip()
+    if not text or text.lower() == "n/a":
+        return None
+    if "/" in text:
+        num, den = text.split("/", 1)
+        try:
+            num_f = float(num)
+            den_f = float(den)
+        except ValueError:
+            return None
+        if den_f == 0:
+            return None
+        return num_f / den_f
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _parse_float(val: object) -> Optional[float]:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    text = str(val).strip()
+    if not text or text.lower() == "n/a":
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _ffprobe_fps_info(video_path: Path) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    if not _ffprobe_available():
+        return None, None, None
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=avg_frame_rate,r_frame_rate,duration:format=duration",
+        "-of",
+        "json",
+        str(video_path),
+    ]
+    try:
+        res = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except (OSError, FileNotFoundError):
+        return None, None, None
+    if res.returncode != 0 or not res.stdout:
+        return None, None, None
+    try:
+        data = json.loads(res.stdout.decode("utf-8", errors="ignore"))
+    except json.JSONDecodeError:
+        return None, None, None
+
+    streams = data.get("streams") or []
+    if not streams:
+        return None, None, None
+    stream = streams[0] or {}
+
+    avg = _parse_fraction(stream.get("avg_frame_rate"))
+    r = _parse_fraction(stream.get("r_frame_rate"))
+    duration = _parse_float(stream.get("duration"))
+    if duration is None:
+        duration = _parse_float((data.get("format") or {}).get("duration"))
+    return avg, r, duration
+
+
+def _resolve_fps_for_video(
+    video_path: Path,
+    *,
+    meta: dict,
+    fps_override: float | None,
+    fps_policy: FPSPolicy,
+    n_frames: int | None = None,
+) -> float:
+    if fps_override is not None:
+        fps_val = float(fps_override)
+        if fps_val <= 0:
+            raise ValueError("fps must be > 0")
+        return fps_val
+
+    meta_fps = _parse_float(meta.get("fps"))
+    meta_duration = _parse_float(meta.get("duration"))
+
+    ff_avg: Optional[float] = None
+    ff_r: Optional[float] = None
+    ff_duration: Optional[float] = None
+    if fps_policy != "metadata":
+        ff_avg, ff_r, ff_duration = _ffprobe_fps_info(video_path)
+
+    duration = meta_duration if meta_duration and meta_duration > 0 else ff_duration
+    fps_from_frames: Optional[float] = None
+    if n_frames is not None and duration and duration > 0:
+        fps_from_frames = float(n_frames) / float(duration)
+
+    def _valid(val: Optional[float]) -> bool:
+        return val is not None and val > 0
+
+    if fps_policy == "metadata":
+        if _valid(meta_fps):
+            return float(meta_fps)
+        raise RuntimeError("Could not determine FPS; pass fps explicitly.")
+
+    if fps_policy == "avg_frame_rate":
+        for candidate in (ff_avg, meta_fps, fps_from_frames, ff_r):
+            if _valid(candidate):
+                return float(candidate)
+        raise RuntimeError("Could not determine FPS; pass fps explicitly.")
+
+    if fps_policy == "r_frame_rate":
+        for candidate in (ff_r, meta_fps, fps_from_frames, ff_avg):
+            if _valid(candidate):
+                return float(candidate)
+        raise RuntimeError("Could not determine FPS; pass fps explicitly.")
+
+    if _valid(ff_avg) and _valid(ff_r):
+        ratio = max(ff_r / ff_avg, ff_avg / ff_r)
+        if ratio >= _FPS_GUARD_RATIO:
+            return float(ff_r)
+
+    if _valid(meta_fps) and _valid(fps_from_frames):
+        ratio = max(meta_fps / fps_from_frames, fps_from_frames / meta_fps)
+        if ratio >= _FPS_GUARD_RATIO:
+            return float(fps_from_frames)
+
+    for candidate in (meta_fps, ff_avg, ff_r, fps_from_frames):
+        if _valid(candidate):
+            return float(candidate)
+
+    raise RuntimeError("Could not determine FPS; pass fps explicitly.")
 
 _VIDEO_EXTS = {
     ".mp4",
@@ -363,6 +530,70 @@ def _audio_chunk_for_interval(
     raise ValueError(f"Unknown audio length mode: {mode}")
 
 
+def _segments_from_block_size(n_frames: int, block_size: int) -> list[tuple[int, int]]:
+    if n_frames <= 0:
+        return []
+    if block_strategy == "fixed" and block_size <= 0:
+        raise ValueError("block_size must be positive")
+    segments: list[tuple[int, int]] = []
+    for start in range(0, n_frames, block_size):
+        end = min(start + block_size, n_frames) - 1
+        segments.append((start, end))
+    return segments
+
+
+def _resolve_block_segments(
+    *,
+    audio: np.ndarray,
+    sr: int,
+    fps: float,
+    n_frames: int | None,
+    block_size: int,
+    block_size_div: int | None,
+    block_strategy: BlockStrategy,
+    block_min_frames: int,
+    block_max_frames: int | None,
+    block_beats_per: int,
+    block_hop_length: int,
+    block_n_fft: int,
+    block_peak_threshold: float,
+    block_peak_distance_s: float,
+    block_structure_kernel: int,
+    block_structure_max_frames: int,
+    block_bpm_min: float,
+    block_bpm_max: float,
+) -> list[tuple[int, int]]:
+    if block_strategy == "fixed":
+        if n_frames is None:
+            return []
+        if block_size_div is not None:
+            if block_size_div <= 0:
+                raise ValueError("block_size_div must be positive")
+            block_size = max(1, int(math.ceil(n_frames / float(block_size_div))))
+        return _segments_from_block_size(n_frames, block_size)
+
+    from exconv.mir.blocks import audio_to_frame_blocks
+
+    return audio_to_frame_blocks(
+        audio=audio,
+        sr=sr,
+        fps=fps,
+        n_frames=n_frames,
+        strategy=block_strategy,
+        min_block_frames=block_min_frames,
+        max_block_frames=block_max_frames,
+        beats_per_block=block_beats_per,
+        hop_length=block_hop_length,
+        n_fft=block_n_fft,
+        peak_threshold=block_peak_threshold,
+        peak_distance_s=block_peak_distance_s,
+        structure_kernel=block_structure_kernel,
+        structure_max_frames=block_structure_max_frames,
+        bpm_min=block_bpm_min,
+        bpm_max=block_bpm_max,
+    )
+
+
 def _image2sound_apply(
     img: np.ndarray,
     audio: np.ndarray,
@@ -579,6 +810,7 @@ def sound2image_video_from_files(
     audio_path: str | Path,
     *,
     fps: float | None = None,
+    fps_policy: FPSPolicy = "auto",
     mode: Mode = "mono",
     colorspace: ColorMode = "luma",
     audio_out_mode: AudioVideoMode = "per-buffer-auto",
@@ -593,8 +825,10 @@ def sound2image_video_from_files(
     video_path, audio_path
         Input paths.
     fps
-        Override FPS if metadata is missing/incorrect. If None, the FPS from
-        `read_video_frames` metadata is used.
+        Override FPS if metadata is missing/incorrect. If None, the FPS is
+        selected according to fps_policy.
+    fps_policy
+        FPS selection policy when fps is None.
     mode, colorspace, audio_out_mode
         Passed through to `sound2image_video_arrays`.
     out_video, out_audio
@@ -617,17 +851,16 @@ def sound2image_video_from_files(
 
     # --- video frames + metadata ---
     frames, meta_fps = read_video_frames(video_path)
-
-    fps_used: float
-    if fps is not None:
-        fps_used = float(fps)
-    else:
-        if not meta_fps or meta_fps <= 0:
-            raise RuntimeError(
-                "Could not determine FPS from video metadata; "
-                "pass fps explicitly."
-            )
-        fps_used = float(meta_fps)
+    meta = _read_video_meta(video_path)
+    if meta_fps and not meta.get("fps"):
+        meta["fps"] = float(meta_fps)
+    fps_used = _resolve_fps_for_video(
+        video_path,
+        meta=meta,
+        fps_override=fps,
+        fps_policy=fps_policy,
+        n_frames=len(frames),
+    )
 
     frames_out, audio_out = sound2image_video_arrays(
         frames=frames,
@@ -682,6 +915,18 @@ def biconv_video_arrays(
     serial_mode: DualSerialMode = "parallel",
     audio_length_mode: AudioLengthMode = "pad-zero",
     block_size: int = 1,
+    block_strategy: BlockStrategy = "fixed",
+    block_min_frames: int = 1,
+    block_max_frames: int | None = None,
+    block_beats_per: int = 1,
+    block_hop_length: int = 512,
+    block_n_fft: int = 2048,
+    block_peak_threshold: float = 0.3,
+    block_peak_distance_s: float = 0.2,
+    block_structure_kernel: int = 16,
+    block_structure_max_frames: int = 600,
+    block_bpm_min: float = 60.0,
+    block_bpm_max: float = 200.0,
     # s2i color controls
     s2i_safe_color: bool = True,
     s2i_chroma_strength: float = 0.5,
@@ -705,7 +950,7 @@ def biconv_video_arrays(
         raise ValueError("fps must be > 0")
     if sr <= 0:
         raise ValueError("sr must be > 0")
-    if block_size <= 0:
+    if block_strategy == "fixed" and block_size <= 0:
         raise ValueError("block_size must be positive")
 
     # If requested, resolve impulse length to the duration of a single frame.
@@ -732,16 +977,43 @@ def biconv_video_arrays(
     audio_chunks: List[np.ndarray] = []
 
     n_frames = len(frames)
-    n_blocks = (n_frames + block_size - 1) // block_size
+    if block_strategy != "fixed":
+        mir_bar = tqdm(total=1, desc="mir analysis", unit="step")
+    else:
+        mir_bar = None
+
+    block_segments = _resolve_block_segments(
+        audio=audio,
+        sr=sr,
+        fps=fps,
+        n_frames=n_frames,
+        block_size=block_size,
+        block_size_div=None,
+        block_strategy=block_strategy,
+        block_min_frames=block_min_frames,
+        block_max_frames=block_max_frames,
+        block_beats_per=block_beats_per,
+        block_hop_length=block_hop_length,
+        block_n_fft=block_n_fft,
+        block_peak_threshold=block_peak_threshold,
+        block_peak_distance_s=block_peak_distance_s,
+        block_structure_kernel=block_structure_kernel,
+        block_structure_max_frames=block_structure_max_frames,
+        block_bpm_min=block_bpm_min,
+        block_bpm_max=block_bpm_max,
+    )
+    if mir_bar is not None:
+        mir_bar.update(1)
+        mir_bar.close()
+
     block_iter = tqdm(
-        range(0, n_frames, block_size),
-        total=n_blocks,
+        block_segments,
+        total=len(block_segments),
         desc="bi-conv video blocks",
         unit="block",
     )
 
-    for block_start in block_iter:
-        block_end = min(block_start + block_size, n_frames) - 1
+    for block_start, block_end in block_iter:
         block_frames = [np.asarray(f) for f in frames[block_start : block_end + 1]]
 
         start, _ = _slice_for_frame(block_start, fps, sr, n_samples)
@@ -891,6 +1163,7 @@ def biconv_video_from_files(
     audio_path: Optional[str | Path] = None,
     *,
     fps: float | None = None,
+    fps_policy: FPSPolicy = "auto",
     s2i_mode: Mode = "mono",
     s2i_colorspace: ColorMode = "luma",
     i2s_mode: Literal["flat", "hist", "radial"] = "radial",
@@ -907,6 +1180,18 @@ def biconv_video_from_files(
     audio_length_mode: AudioLengthMode = "pad-zero",
     block_size: int = 1,
     block_size_div: int | None = None,
+    block_strategy: BlockStrategy = "fixed",
+    block_min_frames: int = 1,
+    block_max_frames: int | None = None,
+    block_beats_per: int = 1,
+    block_hop_length: int = 512,
+    block_n_fft: int = 2048,
+    block_peak_threshold: float = 0.3,
+    block_peak_distance_s: float = 0.2,
+    block_structure_kernel: int = 16,
+    block_structure_max_frames: int = 600,
+    block_bpm_min: float = 60.0,
+    block_bpm_max: float = 200.0,
     s2i_safe_color: bool = True,
     s2i_chroma_strength: float = 0.5,
     s2i_chroma_clip: float = 0.25,
@@ -932,16 +1217,20 @@ def biconv_video_from_files(
         else:
             audio, sr = read_audio(audio_used, dtype="float32", always_2d=True)
     frames, meta_fps = read_video_frames(video_path)
+    meta = _read_video_meta(video_path)
+    if meta_fps and not meta.get("fps"):
+        meta["fps"] = float(meta_fps)
 
-    if fps is None:
-        if not meta_fps or meta_fps <= 0:
-            raise RuntimeError("Could not determine FPS; pass fps explicitly.")
-        fps_used = float(meta_fps)
-    else:
-        fps_used = float(fps)
+    fps_used = _resolve_fps_for_video(
+        video_path,
+        meta=meta,
+        fps_override=fps,
+        fps_policy=fps_policy,
+        n_frames=len(frames),
+    )
 
     # derive block size from divisor if requested
-    if block_size_div is not None:
+    if block_strategy == "fixed" and block_size_div is not None:
         if block_size_div <= 0:
             raise ValueError("block_size_div must be positive")
         block_size = max(1, int(math.ceil(len(frames) / float(block_size_div))))
@@ -966,6 +1255,18 @@ def biconv_video_from_files(
         serial_mode=serial_mode,
         audio_length_mode=audio_length_mode,
         block_size=block_size,
+        block_strategy=block_strategy,
+        block_min_frames=block_min_frames,
+        block_max_frames=block_max_frames,
+        block_beats_per=block_beats_per,
+        block_hop_length=block_hop_length,
+        block_n_fft=block_n_fft,
+        block_peak_threshold=block_peak_threshold,
+        block_peak_distance_s=block_peak_distance_s,
+        block_structure_kernel=block_structure_kernel,
+        block_structure_max_frames=block_structure_max_frames,
+        block_bpm_min=block_bpm_min,
+        block_bpm_max=block_bpm_max,
         s2i_safe_color=s2i_safe_color,
         s2i_chroma_strength=s2i_chroma_strength,
         s2i_chroma_clip=s2i_chroma_clip,
@@ -1041,6 +1342,7 @@ def biconv_video_to_files_stream(
     audio_path: Optional[str | Path] = None,
     *,
     fps: float | None = None,
+    fps_policy: FPSPolicy = "auto",
     s2i_mode: Mode = "mono",
     s2i_colorspace: ColorMode = "luma",
     i2s_mode: Literal["flat", "hist", "radial"] = "radial",
@@ -1057,6 +1359,18 @@ def biconv_video_to_files_stream(
     audio_length_mode: AudioLengthMode = "pad-zero",
     block_size: int = 1,
     block_size_div: int | None = None,
+    block_strategy: BlockStrategy = "fixed",
+    block_min_frames: int = 1,
+    block_max_frames: int | None = None,
+    block_beats_per: int = 1,
+    block_hop_length: int = 512,
+    block_n_fft: int = 2048,
+    block_peak_threshold: float = 0.3,
+    block_peak_distance_s: float = 0.2,
+    block_structure_kernel: int = 16,
+    block_structure_max_frames: int = 600,
+    block_bpm_min: float = 60.0,
+    block_bpm_max: float = 200.0,
     s2i_safe_color: bool = True,
     s2i_chroma_strength: float = 0.5,
     s2i_chroma_clip: float = 0.25,
@@ -1097,14 +1411,12 @@ def biconv_video_to_files_stream(
 
     # --- video metadata (fps/duration) ---
     meta = _read_video_meta(video_path)
-    meta_fps = meta.get("fps", None)
-
-    if fps is None:
-        if not meta_fps or float(meta_fps) <= 0:
-            raise RuntimeError("Could not determine FPS; pass fps explicitly.")
-        fps_used = float(meta_fps)
-    else:
-        fps_used = float(fps)
+    fps_used = _resolve_fps_for_video(
+        video_path,
+        meta=meta,
+        fps_override=fps,
+        fps_policy=fps_policy,
+    )
 
     if fps_used <= 0:
         raise ValueError("fps must be > 0")
@@ -1118,7 +1430,7 @@ def biconv_video_to_files_stream(
     n_frames_est: int | None = _estimate_total_frames_from_meta(meta, fps_used)
 
     # --- derive block size from divisor if requested ---
-    if block_size_div is not None:
+    if block_strategy == "fixed" and block_size_div is not None:
         if block_size_div <= 0:
             raise ValueError("block_size_div must be positive")
         if n_frames_est is None:
@@ -1135,6 +1447,39 @@ def biconv_video_to_files_stream(
                 "use --block-size instead."
             )
         block_size = max(1, int(math.ceil(n_frames_est / float(block_size_div))))
+
+    if block_strategy != "fixed":
+        mir_bar = tqdm(total=1, desc="mir analysis", unit="step")
+    else:
+        mir_bar = None
+
+    block_segments = _resolve_block_segments(
+        audio=audio,
+        sr=sr,
+        fps=fps_used,
+        n_frames=n_frames_est,
+        block_size=block_size,
+        block_size_div=block_size_div,
+        block_strategy=block_strategy,
+        block_min_frames=block_min_frames,
+        block_max_frames=block_max_frames,
+        block_beats_per=block_beats_per,
+        block_hop_length=block_hop_length,
+        block_n_fft=block_n_fft,
+        block_peak_threshold=block_peak_threshold,
+        block_peak_distance_s=block_peak_distance_s,
+        block_structure_kernel=block_structure_kernel,
+        block_structure_max_frames=block_structure_max_frames,
+        block_bpm_min=block_bpm_min,
+        block_bpm_max=block_bpm_max,
+    )
+    if mir_bar is not None:
+        mir_bar.update(1)
+        mir_bar.close()
+
+    block_sizes: list[int] | None = None
+    if block_segments:
+        block_sizes = [end - start + 1 for start, end in block_segments]
 
     # --- writers / temp paths ---
     out_video_p: Path | None = _as_path(out_video) if out_video is not None else None
@@ -1200,7 +1545,9 @@ def biconv_video_to_files_stream(
 
     # Progress bar: estimate blocks if we have an estimate
     n_blocks_est: int | None = None
-    if n_frames_est is not None and n_frames_est > 0:
+    if block_sizes:
+        n_blocks_est = len(block_sizes)
+    elif n_frames_est is not None and n_frames_est > 0:
         n_blocks_est = int((n_frames_est + block_size - 1) // block_size)
 
     def _to_uint8_frame(img_proc: np.ndarray) -> np.ndarray:
@@ -1237,10 +1584,22 @@ def biconv_video_to_files_stream(
         )
 
         block_start = 0
+        block_sizes_iter = iter(block_sizes) if block_sizes else None
         while True:
+            if block_sizes_iter is not None:
+                try:
+                    block_target = int(next(block_sizes_iter))
+                except StopIteration:
+                    block_sizes_iter = None
+                    block_target = int(block_size)
+            else:
+                block_target = int(block_size)
+            if block_target <= 0:
+                block_target = 1
+
             # read frames for this block
             block_frames: list[np.ndarray] = []
-            for _ in range(block_size):
+            for _ in range(block_target):
                 try:
                     f = next(frame_iter)
                 except StopIteration:

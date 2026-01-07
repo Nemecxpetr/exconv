@@ -40,8 +40,12 @@ assume the default samples layout.
   | Pipeline (chaining + blocks) | Default | What it does |
   | --- | --- | --- |
   | `--serial-mode` | `parallel` | Bi-conv chaining (`serial-image-first`, `serial-sound-first`). |
-  | `--block-size` | None | Fixed frames per block; overrides divisor when set. |
-  | `--block-size-div` | `12` | Split into N blocks if `--block-size` not set. |
+  | `--block-strategy` | `fixed` | `fixed` (frame-count), `beats`/`novelty`/`structure` (audio-driven). |
+  | `--block-size` | None | Fixed frames per block (fixed strategy only). |
+  | `--block-size-div` | `12` | Split into N blocks if `--block-size` not set (fixed strategy only). |
+  | `--block-min-frames` | `1` | Minimum block length (audio-driven strategies). |
+  | `--block-max-frames` | None | Maximum block length (audio-driven strategies). |
+  | `--beats-per-block` | `1` | Group this many beats into a block (beats strategy). |
 
   | Sound->image (s2i) | Default | What it does |
   | --- | --- | --- |

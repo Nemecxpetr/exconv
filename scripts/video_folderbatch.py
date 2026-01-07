@@ -292,6 +292,10 @@ class JobSpec:
     serial_mode: str
     block_size: int
     block_size_div: Optional[int]
+    block_strategy: str
+    block_min_frames: int
+    block_max_frames: Optional[int]
+    block_beats_per: int
     s2i_mode: str
     s2i_colorspace: str
     s2i_safe_color: bool
@@ -354,6 +358,10 @@ def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
             audio_length_mode="pad-zero",  # fixed default for this batch script
             block_size=spec.block_size,
             block_size_div=spec.block_size_div,
+            block_strategy=spec.block_strategy,
+            block_min_frames=spec.block_min_frames,
+            block_max_frames=spec.block_max_frames,
+            block_beats_per=spec.block_beats_per,
             s2i_mode=spec.s2i_mode,
             s2i_colorspace=spec.s2i_colorspace,
             i2s_mode=spec.i2s_mode,
@@ -503,6 +511,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Split video into N blocks (default: 12).",
     )
     p.add_argument(
+        "--block-strategy",
+        choices=["fixed", "beats", "novelty", "structure"],
+        default="fixed",
+        help="Block segmentation strategy (fixed or audio-driven).",
+    )
+    p.add_argument(
+        "--block-min-frames",
+        type=int,
+        default=1,
+        help="Minimum block length (frames) for audio-driven strategies.",
+    )
+    p.add_argument(
+        "--block-max-frames",
+        type=int,
+        default=None,
+        help="Maximum block length (frames) for audio-driven strategies.",
+    )
+    p.add_argument(
+        "--beats-per-block",
+        type=int,
+        default=1,
+        help="Group this many beats into a block for --block-strategy beats.",
+    )
+    p.add_argument(
         "--s2i-mode",
         choices=["mono", "stereo", "mid-side"],
         default="mid-side",
@@ -578,14 +610,23 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--block-size must be positive")
     if args.block_size_div is not None and args.block_size_div <= 0:
         raise SystemExit("--block-size-div must be positive")
+    if args.block_min_frames <= 0:
+        raise SystemExit("--block-min-frames must be positive")
+    if args.block_max_frames is not None and args.block_max_frames <= 0:
+        raise SystemExit("--block-max-frames must be positive")
+    if args.beats_per_block <= 0:
+        raise SystemExit("--beats-per-block must be positive")
 
     if args.blas_threads is not None:
         if args.blas_threads <= 0:
             raise SystemExit("--blas-threads must be positive")
         _set_thread_env(args.blas_threads)
 
+    block_strategy = args.block_strategy
     block_size = int(args.block_size) if args.block_size is not None else 1
     block_size_div = None if args.block_size is not None else int(args.block_size_div)
+    if block_strategy != "fixed":
+        block_size_div = None
 
     root = _path(args.root)
     project = args.project
@@ -663,6 +704,14 @@ def main(argv: list[str] | None = None) -> int:
                 serial_mode=args.serial_mode,
                 block_size=block_size,
                 block_size_div=block_size_div,
+                block_strategy=block_strategy,
+                block_min_frames=int(args.block_min_frames),
+                block_max_frames=(
+                    int(args.block_max_frames)
+                    if args.block_max_frames is not None
+                    else None
+                ),
+                block_beats_per=int(args.beats_per_block),
                 s2i_mode=args.s2i_mode,
                 s2i_colorspace=args.s2i_colorspace,
                 s2i_safe_color=bool(args.s2i_safe_color),
@@ -684,7 +733,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[config] found={len(videos)} queued={len(specs)} skipped={skipped}")
     print(
         f"[config] jobs={args.jobs} variants={args.variants} "
-        f"block_size={block_size} block_size_div={block_size_div}"
+        f"block_strategy={block_strategy} block_size={block_size} "
+        f"block_size_div={block_size_div} beats_per_block={args.beats_per_block} "
+        f"block_min_frames={args.block_min_frames} block_max_frames={args.block_max_frames}"
     )
 
     if args.dry_run:

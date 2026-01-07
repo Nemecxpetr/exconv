@@ -48,6 +48,10 @@ def run_video_biconv(
     audio_length_mode: AudioLengthMode,
     block_size: int,
     block_size_div: int | None,
+    block_strategy: str,
+    block_min_frames: int,
+    block_max_frames: int | None,
+    block_beats_per: int,
     s2i_mode: str,
     s2i_colorspace: str,
     i2s_mode: str,
@@ -93,6 +97,10 @@ def run_video_biconv(
         audio_length_mode=audio_length_mode,
         block_size=block_size,
         block_size_div=block_size_div,
+        block_strategy=block_strategy,  # type: ignore[arg-type]
+        block_min_frames=block_min_frames,
+        block_max_frames=block_max_frames,
+        block_beats_per=block_beats_per,
         out_video=out_video,
         out_audio=out_audio,
         mux_output=mux,
@@ -183,13 +191,47 @@ def register_video_biconv_subcommand(subparsers: argparse._SubParsersAction) -> 
         "--block-size",
         type=int,
         default=1,
-        help="Process frames in blocks of this size (e.g. 12, 24, 50, 120...) using the same audio chunk.",
+        help=(
+            "Process frames in blocks of this size (e.g. 12, 24, 50, 120...) "
+            "using the same audio chunk (fixed strategy only)."
+        ),
     )
     p.add_argument(
         "--block-size-div",
         type=int,
         default=None,
-        help="Alternative: split the video into N blocks (divisor). 1 = whole video as one block, 2 = halves, etc. Overrides --block-size when set.",
+        help=(
+            "Alternative: split the video into N blocks (divisor). "
+            "1 = whole video as one block, 2 = halves, etc. "
+            "Overrides --block-size when set (fixed strategy only)."
+        ),
+    )
+    p.add_argument(
+        "--block-strategy",
+        choices=["fixed", "beats", "novelty", "structure"],
+        default="fixed",
+        help=(
+            "Block segmentation strategy: fixed (frame-count) or "
+            "audio-driven (beats/novelty/structure)."
+        ),
+    )
+    p.add_argument(
+        "--block-min-frames",
+        type=int,
+        default=1,
+        help="Minimum block length (in frames) when using audio-driven strategies.",
+    )
+    p.add_argument(
+        "--block-max-frames",
+        type=int,
+        default=None,
+        help="Maximum block length (in frames) when using audio-driven strategies.",
+    )
+    p.add_argument(
+        "--beats-per-block",
+        type=int,
+        default=1,
+        help="Group this many beats into a single block for --block-strategy beats.",
     )
     # sound->image
     p.add_argument(
@@ -312,6 +354,10 @@ def _cmd_video_biconv(args: argparse.Namespace) -> int:
         audio_length_mode=args.audio_length_mode,
         block_size=args.block_size,
         block_size_div=args.block_size_div,
+        block_strategy=args.block_strategy,
+        block_min_frames=args.block_min_frames,
+        block_max_frames=args.block_max_frames,
+        block_beats_per=args.beats_per_block,
         s2i_mode=args.s2i_mode,
         s2i_colorspace=args.s2i_colorspace,
         i2s_mode=args.i2s_mode,
