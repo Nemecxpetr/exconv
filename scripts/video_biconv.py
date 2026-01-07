@@ -45,6 +45,13 @@ from exconv.cli.video_biconv import run_video_biconv
     help="Override FPS if metadata missing/incorrect.",
 )
 @click.option(
+    "--fps-policy",
+    type=click.Choice(["auto", "metadata", "avg_frame_rate", "r_frame_rate"]),
+    default="auto",
+    show_default=True,
+    help="FPS selection policy when --fps is unset.",
+)
+@click.option(
     "--mux/--no-mux",
     default=True,
     show_default=True,
@@ -163,6 +170,7 @@ def main(
     out_video: Path,
     out_audio: Path | None,
     fps: float | None,
+    fps_policy: str,
     mux: bool,
     serial_mode: DualSerialMode,
     audio_length_mode: AudioLengthMode,
@@ -190,6 +198,7 @@ def main(
             out_video=out_video,
             out_audio=out_audio,
             fps=fps,
+            fps_policy=fps_policy,
             mux=mux,
             serial_mode=serial_mode,
             audio_length_mode=audio_length_mode,

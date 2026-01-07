@@ -42,6 +42,7 @@ def run_video_biconv(
     out_video: Path,
     out_audio: Path | None,
     fps: float | None,
+    fps_policy: str = "auto",
     mux: bool,
     serial_mode: DualSerialMode,
     audio_length_mode: AudioLengthMode,
@@ -72,6 +73,7 @@ def run_video_biconv(
         video_path=video_path,
         audio_path=audio_path,
         fps=fps,
+        fps_policy=fps_policy,
         s2i_mode=s2i_mode,  # type: ignore[arg-type]
         s2i_colorspace=s2i_colorspace,  # type: ignore[arg-type]
         s2i_safe_color=s2i_safe_color,
@@ -142,6 +144,15 @@ def register_video_biconv_subcommand(subparsers: argparse._SubParsersAction) -> 
         type=float,
         default=None,
         help="Override FPS if metadata missing/incorrect.",
+    )
+    p.add_argument(
+        "--fps-policy",
+        choices=["auto", "metadata", "avg_frame_rate", "r_frame_rate"],
+        default="auto",
+        help=(
+            "FPS selection policy when --fps is unset. "
+            "auto prefers r_frame_rate when avg/r differ significantly."
+        ),
     )
     p.add_argument(
         "--mux",
@@ -295,6 +306,7 @@ def _cmd_video_biconv(args: argparse.Namespace) -> int:
         out_video=out_video,
         out_audio=out_audio,
         fps=args.fps,
+        fps_policy=args.fps_policy,
         mux=args.mux,
         serial_mode=args.serial_mode,
         audio_length_mode=args.audio_length_mode,

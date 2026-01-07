@@ -47,7 +47,9 @@ Notes on performance
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -69,6 +71,9 @@ VIDEO_EXTS = {
     ".flv",
     ".ogv",
 }
+
+_FFPROBE_AVAILABLE: bool | None = None
+_FPS_GUARD_RATIO = 1.2
 
 
 def _path(p: str | Path) -> Path:
@@ -101,6 +106,177 @@ def _set_thread_env(n: int) -> None:
         os.environ[key] = val
 
 
+def _ffprobe_available() -> bool:
+    global _FFPROBE_AVAILABLE
+    if _FFPROBE_AVAILABLE is not None:
+        return _FFPROBE_AVAILABLE
+    try:
+        subprocess.run(
+            ["ffprobe", "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        _FFPROBE_AVAILABLE = True
+    except (OSError, FileNotFoundError):
+        _FFPROBE_AVAILABLE = False
+    return _FFPROBE_AVAILABLE
+
+
+def _parse_fraction(val: object) -> Optional[float]:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    text = str(val).strip()
+    if not text:
+        return None
+    if "/" in text:
+        num, den = text.split("/", 1)
+        try:
+            num_f = float(num)
+            den_f = float(den)
+        except ValueError:
+            return None
+        if den_f == 0:
+            return None
+        return num_f / den_f
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _parse_float(val: object) -> Optional[float]:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    text = str(val).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _ffprobe_fps_info(video_path: Path) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    if not _ffprobe_available():
+        return None, None, None
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=avg_frame_rate,r_frame_rate,duration:format=duration",
+        "-of",
+        "json",
+        str(video_path),
+    ]
+    try:
+        res = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except (OSError, FileNotFoundError):
+        return None, None, None
+    if res.returncode != 0 or not res.stdout:
+        return None, None, None
+    try:
+        data = json.loads(res.stdout.decode("utf-8", errors="ignore"))
+    except json.JSONDecodeError:
+        return None, None, None
+
+    streams = data.get("streams") or []
+    if not streams:
+        return None, None, None
+    stream = streams[0] or {}
+
+    avg = _parse_fraction(stream.get("avg_frame_rate"))
+    r = _parse_fraction(stream.get("r_frame_rate"))
+    duration = _parse_float(stream.get("duration"))
+    if duration is None:
+        duration = _parse_float((data.get("format") or {}).get("duration"))
+    return avg, r, duration
+
+
+@dataclass(frozen=True)
+class FpsDecision:
+    fps_override: Optional[float]
+    fps_policy: Optional[str]
+
+
+def _resolve_fps_override(
+    video_path: Path,
+    *,
+    default_fps: Optional[float],
+    guard_mode: str,
+    decision_cache: Optional[dict[tuple[float, float], FpsDecision]] = None,
+) -> FpsDecision:
+    if default_fps is not None or guard_mode == "off":
+        return FpsDecision(fps_override=default_fps, fps_policy=None)
+
+    avg, r, _duration = _ffprobe_fps_info(video_path)
+    if avg is None or r is None or avg <= 0 or r <= 0:
+        return FpsDecision(fps_override=None, fps_policy=None)
+
+    ratio = max(r / avg, avg / r)
+    if ratio < _FPS_GUARD_RATIO:
+        return FpsDecision(fps_override=None, fps_policy=None)
+
+    key = (round(avg, 3), round(r, 3))
+    if decision_cache is not None and key in decision_cache:
+        return decision_cache[key]
+
+    recommended = r
+    print(
+        "[fps-guard] This problem has been detected for "
+        f"{video_path.name}: avg_frame_rate={avg:.3f} r_frame_rate={r:.3f}."
+    )
+    print(
+        "[fps-guard] Using avg_frame_rate can slow playback; "
+        f"recommended fps={recommended:.3f}."
+    )
+
+    if guard_mode == "auto" or not sys.stdin.isatty():
+        print(f"[fps-guard] Using fps={recommended:.3f} for {video_path.name}.")
+        decision = FpsDecision(fps_override=recommended, fps_policy=None)
+        if decision_cache is not None:
+            decision_cache[key] = decision
+        return decision
+
+    while True:
+        resp = input("Use recommended fps for all matching files? [Y/n] ").strip().lower()
+        if resp in ("", "y", "yes"):
+            decision = FpsDecision(fps_override=recommended, fps_policy=None)
+            if decision_cache is not None:
+                decision_cache[key] = decision
+            return decision
+        if resp in ("n", "no"):
+            break
+        print("Please enter Y or n.")
+
+    while True:
+        val = input("Enter FPS to use (blank to keep metadata): ").strip()
+        if val == "":
+            decision = FpsDecision(fps_override=None, fps_policy="metadata")
+            if decision_cache is not None:
+                decision_cache[key] = decision
+            return decision
+        try:
+            fps_val = float(val)
+        except ValueError:
+            print("Invalid FPS. Enter a number like 30 or 29.97.")
+            continue
+        if fps_val <= 0:
+            print("FPS must be > 0.")
+            continue
+        decision = FpsDecision(fps_override=fps_val, fps_policy=None)
+        if decision_cache is not None:
+            decision_cache[key] = decision
+        return decision
+
+
 @dataclass(frozen=True)
 class JobSpec:
     video_path: Path
@@ -111,6 +287,7 @@ class JobSpec:
     tmp_video: Path
     tmp_audio: Path
     fps: Optional[float]
+    fps_policy: str
     # requested pipeline defaults
     serial_mode: str
     block_size: int
@@ -171,6 +348,7 @@ def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
             out_video=spec.tmp_video,
             out_audio=spec.tmp_audio,
             fps=spec.fps,
+            fps_policy=spec.fps_policy,
             mux=False,
             serial_mode=spec.serial_mode,  # type: ignore[arg-type]
             audio_length_mode="pad-zero",  # fixed default for this batch script
@@ -294,6 +472,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override FPS if metadata missing/incorrect.",
     )
+    p.add_argument(
+        "--fps-guard",
+        choices=["off", "ask", "auto"],
+        default="ask",
+        help=(
+            "Detect mismatched avg/r frame rates and prompt to override FPS. "
+            "Use 'auto' to apply the recommendation without prompting; "
+            "'off' keeps metadata FPS."
+        ),
+    )
 
     # pipeline options (default to the requested settings)
     p.add_argument(
@@ -413,7 +601,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[video] No videos found in {in_dir}")
         return 1
 
+    guard_mode = args.fps_guard
+    if guard_mode == "ask" and not sys.stdin.isatty():
+        guard_mode = "auto"
+    if guard_mode != "off" and not _ffprobe_available():
+        print("[fps-guard] ffprobe not found; skipping FPS mismatch checks.")
+        guard_mode = "off"
+    default_fps_policy = "metadata" if guard_mode == "off" else "auto"
+
     specs: list[JobSpec] = []
+    fps_guard_decisions: dict[tuple[float, float], FpsDecision] = {}
     skipped = 0
     for vp in videos:
         base = f"{vp.stem}{args.suffix}"
@@ -439,6 +636,19 @@ def main(argv: list[str] | None = None) -> int:
         write_video_only = args.overwrite or (out_video_only is not None and not out_video_only.exists())
         write_audio_only = args.overwrite or (out_audio_only is not None and not out_audio_only.exists())
 
+        fps_override = args.fps
+        fps_policy = default_fps_policy
+        if args.fps is None and guard_mode != "off":
+            decision = _resolve_fps_override(
+                vp,
+                default_fps=args.fps,
+                guard_mode=guard_mode,
+                decision_cache=fps_guard_decisions,
+            )
+            if decision.fps_override is not None:
+                fps_override = decision.fps_override
+            if decision.fps_policy is not None:
+                fps_policy = decision.fps_policy
         specs.append(
             JobSpec(
                 video_path=vp,
@@ -448,7 +658,8 @@ def main(argv: list[str] | None = None) -> int:
                 out_audio_only=out_audio_only,
                 tmp_video=tmp_video,
                 tmp_audio=tmp_audio,
-                fps=args.fps,
+                fps=fps_override,
+                fps_policy=fps_policy,
                 serial_mode=args.serial_mode,
                 block_size=block_size,
                 block_size_div=block_size_div,
