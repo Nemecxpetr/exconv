@@ -150,6 +150,9 @@ Use the included samples for a quick spin:
 - Sound→image: `exconv sound2image --img samples/input/img/glitch_bean.png --audio samples/input/audio/original.wav --out samples/output/img/glitch_sculpt.png --colorspace luma`
 - Image→sound: `python scripts/image2sound_demo.py --audio samples/input/test_assets/audio_long_sines.wav --image samples/input/test_assets/img_checker.png --mode radial --impulse-len auto --phase-mode spiral --out-dir samples/output/audio/img2sound_demo`
 - Bi-conv video: `exconv video-biconv --video samples/input/video/test_01.mp4 --out-video samples/output/video/test_01_biconv.mp4 --out-audio samples/output/audio/test_01_biconv.wav --serial-mode parallel --audio-length-mode pad-zero --i2s-phase-mode spiral --i2s-impulse-len auto`
+- Batch audio + sound2image: `exconv folderbatch my_project --root samples --audio-mode same-center --audio-order 2 --audio-normalize rms`
+- Batch video: `exconv video-folderbatch my_project --jobs 2 --suffix _biconv --serial-mode parallel`
+- Animate frames: `exconv animate samples/output/sound2image/my_project/animations out.mp4 --fps 12`
 
 The package exposes a small demo CLI in `exconv.cli.exconv_cli`, registered
 as the `exconv` command.
@@ -346,8 +349,7 @@ Outputs: processed video and audio files written to the given paths.
   color handling, cross-modal mapping.
 - **API reference**: [`docs/api.md`](docs/api.md) — signatures and parameter
   semantics.
-- **Scripts**: [`docs/scripts.md`](docs/scripts.md) — batch runners and helper
-  CLI usage.
+- **CLI + scripts**: [`docs/scripts.md`](docs/scripts.md) - batch subcommands and legacy helpers.
 - **Changelog**: [`CHANGELOG.md`](CHANGELOG.md) — latest additions.
 
 ---

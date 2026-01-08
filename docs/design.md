@@ -403,6 +403,7 @@ Cross-modal processing lives in `exconv.xmodal.sound2image`. The goal is to
 sculpt an image using spectral information from an audio signal, in a way
 
 that can capture mono, stereo and mid-side relations.
+See `docs/api.md` section 5 for function signatures and CLI references.
 
 
 
@@ -515,13 +516,9 @@ Depending on `colorspace`:
 
 
   | `mode`     | filter used for luma |
-
   |-----------|----------------------|
-
   | `"mono"`  | spectrum of `mono`   |
-
   | `"stereo"`| spectrum of `mono`   |
-
   | `"mid-side"` | spectrum of `mid` |
 
 
@@ -540,7 +537,7 @@ Normalization:
 
 
 
-- If `normalize=True`, we globally rescale to `[0,1]` via `_normalize_01_global`.
+- If `normalize=True`, we globally rescale to `[0,1]` via `normalize_range_01`.
 
 
 
@@ -577,13 +574,9 @@ image-like values in [0,1].
 
 
   | `mode`     | Y filter        | Cb filter      | Cr filter      |
-
   |-----------|-----------------|----------------|----------------|
-
   | `"mono"`  | `H_mono`        | identity       | identity       |
-
   | `"stereo"`| `H_mono`        | `H_L`          | `H_R`          |
-
   | `"mid-side"` | `H_mid`     | `H_sideL`      | `H_sideR`      |
 
 
@@ -722,6 +715,77 @@ $h = \mathrm{irfft}(H_{\text{half}}, n=\text{impulse\_len})$.
   in `serial-image-first`, the mean is taken after sound->image processing.
 
   Output audio is the concatenation of per-block chunks.
+
+#### Serial chaining (`--serial-mode`)
+
+Bi-conv has two directions per block: sound->image (per frame) and
+image->sound (per block mean image). `serial_mode` chooses whether these
+paths are independent or feed into each other.
+
+```txt
+parallel:
+  img_out = sound->image(frame, audio_chunk)
+  aud_out = image->sound(mean(frame), audio_chunk)
+
+serial-image-first:
+  img_out = sound->image(frame, audio_chunk)
+  aud_out = image->sound(mean(img_out), audio_chunk)
+
+serial-sound-first:
+  aud_out = image->sound(mean(frame), audio_chunk)
+  img_out = sound->image(frame, aud_out)
+```
+
+Notes:
+
+- `audio_chunk` is the per-block audio slice after `audio_length_mode` aligns
+  audio to the video duration.
+- `serial-image-first` makes audio depend on processed images; `serial-sound-first`
+  makes images depend on processed audio; `parallel` keeps both paths independent.
+
+#### Audio length matching (`--audio-length-mode`)
+
+Before block segmentation, audio is matched to the video duration. Modes:
+
+- `trim`: cut to video length; if shorter, zero-pad to length.
+- `pad-zero`: same as trim in practice: cut or zero-pad to length.
+- `pad-loop`: repeat the audio to fill, then cut to length.
+- `pad-noise`: extend with low-level noise (about 1% RMS of source).
+- `center-zero`: center-crop when longer; center-pad with zeros when shorter.
+
+#### Block segmentation and crossovers
+
+Block boundaries define which audio chunk drives each group of frames.
+
+- `block_size` / `block_size_div`: fixed-size blocks; divisor splits into N blocks.
+- `block_strategy`: `fixed` (frame count) or audio-driven `beats`, `novelty`,
+  `structure` (see `exconv.mir.blocks` for the analysis).
+- `block_min_frames` / `block_max_frames`: merge or split audio-driven blocks
+  to keep them within these bounds.
+- `--crossover` / `--crossover-frames`: optional frame+audio blending between
+  adjacent blocks.
+  - `none`: hard boundary, no blending.
+  - `lin`: linear amplitude fade, `w_prev = 1 - t`, `w_cur = t`.
+  - `equal`: equal-energy fade, `w = sqrt(t)`.
+  - `power`: equal-power fade, `w_prev = cos(t*pi/2)`, `w_cur = sin(t*pi/2)`.
+  `--crossover-frames` is the number of frames taken from each block side;
+  the actual overlap is clamped to the length of each neighboring block.
+- ADSR vs crossover: crossover blends *between* blocks at their boundaries,
+  while ADSR shapes the *entire* per-block audio chunk. If both are enabled,
+  ADSR is applied first on each block's audio, then crossover blends adjacent
+  edges.
+- `block-adsr-*`: optional per-block envelope on the output audio.
+
+Audio-driven block knobs (used by `beats`, `novelty`, `structure`):
+
+- `block_hop_length`: STFT hop size (samples) for novelty timing.
+- `block_n_fft`: FFT size for spectral features (time/frequency tradeoff).
+- `block_peak_threshold`: peak-pick threshold after normalization (0..1).
+- `block_peak_distance_s`: minimum seconds between detected peaks.
+- `block_beats_per`: beats per block when using `beats` (1 = per beat).
+- `block_bpm_min` / `block_bpm_max`: tempo search bounds for `beats`.
+- `block_structure_kernel`: checkerboard kernel size for structure novelty.
+- `block_structure_max_frames`: downsample cap to keep structure analysis stable.
 
 ---
 
