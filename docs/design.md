@@ -564,9 +564,13 @@ RGB  Y, Cb, Cr
 
 $Y = 0.299 R + 0.587 G + 0.114 B$,
 
-$Cb = -0.168736 R - 0.331264 G + 0.5 B + 0.5$,
+$Cb = 0.564 (B - Y) + 0.5$,
 
-$Cr = 0.5 R - 0.418688 G - 0.081312 B + 0.5$.
+$Cr = 0.713 (R - Y) + 0.5$.
+
+We keep the +0.5 chroma offset so neutral chroma is centered at 0.5 and
+intermediate filtering/clipping in YCbCr space can safely operate on
+image-like values in [0,1].
 
 - Filters are assigned as:
 
@@ -635,8 +639,10 @@ These determine whether the impulse is mono or stereo:
   $Y = 0.299 R + 0.587 G + 0.114 B$,
   $Cb = 0.564 (B - Y) + 0.5$,
   $Cr = 0.713 (R - Y) + 0.5$,
-  $L = \mathrm{clip}(Y + (Cr - 0.5))$,
-  $R = \mathrm{clip}(Y + (Cb - 0.5))$.
+  treat $Y$ as mid $M$ and chroma offsets as sides
+  ($S_L = Cr - 0.5$, $S_R = Cb - 0.5$),
+  $L = \mathrm{clip}(M + S_L)$,
+  $R = \mathrm{clip}(M + S_R)$.
 
 #### Impulse modes (i2s-mode)
 
