@@ -533,7 +533,7 @@ def _audio_chunk_for_interval(
 def _segments_from_block_size(n_frames: int, block_size: int) -> list[tuple[int, int]]:
     if n_frames <= 0:
         return []
-    if block_strategy == "fixed" and block_size <= 0:
+    if block_size <= 0:
         raise ValueError("block_size must be positive")
     segments: list[tuple[int, int]] = []
     for start in range(0, n_frames, block_size):

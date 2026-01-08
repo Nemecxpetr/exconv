@@ -7,7 +7,9 @@ from typing import Optional, Dict
 import numpy as np
 
 from exconv import __version__  # version helper :contentReference[oaicite:0]{index=0}
+from exconv.cli.folderbatch import register_folderbatch_subcommand
 from exconv.cli.video_biconv import register_video_biconv_subcommand
+from exconv.cli.video_folderbatch import register_video_folderbatch_subcommand
 from exconv.io import (
     read_audio,
     write_audio,
@@ -315,8 +317,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_s2i.set_defaults(func=_cmd_sound2image, normalize=True)
 
+    # ---- folderbatch ----
+    register_folderbatch_subcommand(subparsers)
+
     # ---- video-biconv ----
     register_video_biconv_subcommand(subparsers)
+
+    # ---- video-folderbatch ----
+    register_video_folderbatch_subcommand(subparsers)
 
     return parser
 
