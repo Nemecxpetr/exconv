@@ -140,13 +140,9 @@ Given `x` and `h` on some axes:
 
 
 
-- `full`  the mathematically full linear convolution
+- `full`  the mathematically full linear convolution  
+  $\text{length(full)} = \mathrm{len}(x) + \mathrm{len}(h) - 1$
 
-  ```math
-  \text{length(full)} = \mathrm{len}(x) + \mathrm{len}(h) - 1
-  ```
-
-  ASCII: length(full) = len(x) + len(h) - 1
 
 
 - `same-first`  first `len(x)` samples/pixels (like NumPys `"same"` but
@@ -456,43 +452,23 @@ Steps (conceptually):
 
      `L` and `R` always exist.
 
-   - Derive:
-
-     ```math
-     \begin{aligned}
-     \text{mono} &= (L + R) / 2 \\
-     \text{mid} &= (L + R) / 2 \\
-     \text{sideL} &= L - \text{mid} = (L - R) / 2 \\
-     \text{sideR} &= R - \text{mid} = (R - L) / 2
-     \end{aligned}
-     ```
-
-     ASCII: mono=(L+R)/2, mid=(L+R)/2, sideL=L-mid=(L-R)/2, sideR=R-mid=(R-L)/2.
+   - Derive: $\text{mono} = (L + R) / 2$, $\text{mid} = (L + R) / 2$,
+     $\text{sideL} = (L - R) / 2$, $\text{sideR} = (R - L) / 2$.
 
 
 2. **Spectra** via `_rfft_magnitude`:
+
    - 1D real FFT (`rfft`) of each signal  magnitude  normalized to max=1:
-
-     ```math
-     S[k] = \frac{|\mathrm{rfft}(x)[k]|}{\max_k |\mathrm{rfft}(x)[k]|}
-     ```
-
-     ASCII: S[k] = |rfft(x)[k]| / max_k |rfft(x)[k]|.
+     $S[k] = \frac{|\mathrm{rfft}(x)[k]|}{\max_k |\mathrm{rfft}(x)[k]|}$.
    - Silent input  return an all-ones curve (identity filter).
+
 
 
 3. **Radial filters** via `_radial_filter_from_curve`:
    - Construct a 2D radius grid `rho` in `[0,1]` using `radial_grid_2d(H, W)`.  
    - Map `curve` indices along `rho`:
-
-
-     ```math
-     \text{idx} = \lfloor \rho (F - 1) \rfloor, \quad H_2 = \text{curve}[\text{idx}]
-     ```
-
-     ASCII: idx = int(rho * (F - 1)); H2 = curve[idx].
-
-
+     $\text{idx} = \lfloor \rho (F - 1) \rfloor$,
+     $H_2 = \text{curve}[\text{idx}]$.
    - This yields isotropic ring patterns that encode the audio spectrum.
 
 
@@ -551,14 +527,7 @@ Depending on `colorspace`:
 
 
 - Luma slice is filtered with `_fft_filter_apply`:
-
-
-
-  ```math
-  y_{\text{luma}} = \mathcal{F}^{-1}\left(\mathcal{F}(\text{luma}) \cdot H_{\text{luma}}\right)
-  ```
-
-  ASCII: y_luma = IFFT2(FFT2(luma) * H_luma).
+  $y_{\text{luma}} = \mathcal{F}^{-1}\left(\mathcal{F}(\text{luma}) \cdot H_{\text{luma}}\right)$.
 
 
 - If original image was color, we expand `y_luma` back to RGB by channel
@@ -583,21 +552,19 @@ Normalization:
 
 - Convert RGB  YCbCr using `_rgb_to_ycbcr` / `_ycbcr_to_rgb`.
 
-  ```txt
-  RGB  Y, Cb, Cr
-  ```
 
-  (approx. BT.601)
 
-  ```math
-  \begin{aligned}
-  Y &= 0.299 R + 0.587 G + 0.114 B \\
-  Cb &= -0.168736 R - 0.331264 G + 0.5 B + 0.5 \\
-  Cr &= 0.5 R - 0.418688 G - 0.081312 B + 0.5
-  \end{aligned}
-  ```
+```txt
+RGB  Y, Cb, Cr
+```
 
-  ASCII: Y=0.299R+0.587G+0.114B; Cb=-0.168736R-0.331264G+0.5B+0.5; Cr=0.5R-0.418688G-0.081312B+0.5.
+
+
+(approx. BT.601)
+
+$Y = 0.299 R + 0.587 G + 0.114 B$,
+$Cb = -0.168736 R - 0.331264 G + 0.5 B + 0.5$,
+$Cr = 0.5 R - 0.418688 G - 0.081312 B + 0.5$.
 
 - Filters are assigned as:
 
@@ -617,6 +584,8 @@ Normalization:
 
 - We recombine to YCbCr, clip softly, convert back to RGB and (optionally)
   clip to `[0,1]`.
+
+
 
 #### Safe-color controls (s2i-safe-color, s2i-chroma-*)
 
@@ -643,12 +612,7 @@ chosen channels.
 
 Image->sound lives in `exconv.xmodal.image2sound`. It derives an impulse
 response `h[n]` from the image, then applies 1D linear convolution to audio:
-
-```math
-y[n] = \sum_k x[k] \, h[n - k]
-```
-
-ASCII: y[n] = sum_k x[k] * h[n - k].
+$y[n] = \sum_k x[k] \, h[n - k]$.
 
 The pipeline:
 
@@ -666,17 +630,11 @@ These determine whether the impulse is mono or stereo:
 - `rgb-mean` (mono): $Y = (R + G + B) / 3$
 - `rgb-stereo` (stereo): left = `R`, right = `B` (if no `B`, repeat `R`)
 - `ycbcr-mid-side` (stereo):
-  ```math
-  \begin{aligned}
-  Y &= 0.299 R + 0.587 G + 0.114 B \\
-  Cb &= 0.564 (B - Y) + 0.5 \\
-  Cr &= 0.713 (R - Y) + 0.5 \\
-  L &= \mathrm{clip}(Y + (Cr - 0.5)) \\
-  R &= \mathrm{clip}(Y + (Cb - 0.5))
-  \end{aligned}
-  ```
-
-  ASCII: Y=0.299R+0.587G+0.114B; Cb=0.564(B-Y)+0.5; Cr=0.713(R-Y)+0.5; L=clip(Y+(Cr-0.5)); R=clip(Y+(Cb-0.5)).
+  $Y = 0.299 R + 0.587 G + 0.114 B$,
+  $Cb = 0.564 (B - Y) + 0.5$,
+  $Cr = 0.713 (R - Y) + 0.5$,
+  $L = \mathrm{clip}(Y + (Cr - 0.5))$,
+  $R = \mathrm{clip}(Y + (Cb - 0.5))$.
 
 #### Impulse modes (i2s-mode)
 
@@ -688,16 +646,10 @@ These determine whether the impulse is mono or stereo:
   $h[b] = |\{ g \in \text{bin } b \}|$ for $b = 0..n\_bins-1$.  
   Impulse length is `n_bins`.
 
-- `radial`  FFT magnitude radial profile  
-  ```math
-  \begin{aligned}
-  G(u,v) &= \mathrm{FFT2}(g) \\
-  M(u,v) &= |\mathrm{shift}(G)| \\
-  p[k] &= \mathrm{mean}\{ M(u,v) : \mathrm{bin}(u,v) = k \}
-  \end{aligned}
-  ```
-
-  ASCII: G(u,v)=FFT2(g); M(u,v)=|shift(G)|; p[k]=mean{M(u,v):bin(u,v)=k}.
+- `radial`  FFT magnitude radial profile:
+  $G(u,v) = \mathrm{FFT2}(g)$,
+  $M(u,v) = |\mathrm{shift}(G)|$,
+  $p[k] = \mathrm{mean}\{ M(u,v) : \mathrm{bin}(u,v) = k \}$,
   with radial binning (linear or log) and optional Hann smoothing.
 
 #### Radial options (i2s-radius-mode, i2s-phase-mode, i2s-smoothing)
@@ -718,19 +670,11 @@ These determine whether the impulse is mono or stereo:
     in that order to form $\phi[k]$.
   - `min-phase`  minimum-phase reconstruction:  
     $c = \mathrm{irfft}(\log |H|)$, then
-    $H_{\min} = \exp(\mathrm{rfft}(c_{\min}))$ where
-    $c_{\min}$ doubles positive quefrencies.
+    $H_{\min} = \exp(\mathrm{rfft}(c_{\min}))$,
+    where $c_{\min}$ doubles positive quefrencies.
 
-Then
-```math
-H_{\text{half}}[k] = p[k] \, \exp(i \, \phi[k])
-```
-and the impulse is
-```math
-h = \mathrm{irfft}(H_{\text{half}}, n=\text{impulse\_len})
-```
-
-ASCII: H_half[k] = p[k] * exp(i * phi[k]); h = irfft(H_half, n=impulse_len).
+Then $H_{\text{half}}[k] = p[k] \, \exp(i \, \phi[k])$, and the impulse is
+$h = \mathrm{irfft}(H_{\text{half}}, n=\text{impulse\_len})$.
 
 #### Length, padding, normalization (i2s-impulse-len, i2s-pad-mode, i2s-*)
 
@@ -809,4 +753,3 @@ The design intention is:
 
 
 ---
-
