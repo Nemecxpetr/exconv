@@ -563,7 +563,9 @@ RGB  Y, Cb, Cr
 (approx. BT.601)
 
 $Y = 0.299 R + 0.587 G + 0.114 B$,
+
 $Cb = -0.168736 R - 0.331264 G + 0.5 B + 0.5$,
+
 $Cr = 0.5 R - 0.418688 G - 0.081312 B + 0.5$.
 
 - Filters are assigned as:
