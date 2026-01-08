@@ -16,6 +16,9 @@ from __future__ import annotations
 from typing import Literal, Tuple
 import numpy as np
 
+from exconv.dsp.windows import hann
+from exconv.dsp.normalize import normalize_impulse, normalize_to_reference
+
 PadMode = Literal["full", "same-center", "same-first"]
 ImpulseNorm = Literal["none", "peak", "energy"]
 OutNorm = Literal["none", "match_peak", "match_rms"]
@@ -122,15 +125,17 @@ def _extract_channels(img: np.ndarray, colorspace: ColorMode) -> list[np.ndarray
         b = arr[..., 2] if arr.shape[2] > 2 else arr[..., 0]
         return [r.astype(np.float32), b.astype(np.float32)]
     if colorspace == "ycbcr-mid-side":
-        # Y for body, Cr to left side, Cb to right side, then back to LR
+        # Treat Y as mid (M), Cr/Cb offsets as side signals (S_L / S_R).
         r = arr[..., 0]
         g = arr[..., 1]
         b = arr[..., 2] if arr.shape[2] > 2 else arr[..., 0]
-        y = 0.299 * r + 0.587 * g + 0.114 * b
-        cb = 0.564 * (b - y) + 0.5
-        cr = 0.713 * (r - y) + 0.5
-        left = np.clip(y + (cr - 0.5), 0.0, 1.0)
-        right = np.clip(y + (cb - 0.5), 0.0, 1.0)
+        mid = 0.299 * r + 0.587 * g + 0.114 * b
+        cb = 0.564 * (b - mid) + 0.5
+        cr = 0.713 * (r - mid) + 0.5
+        side_l = cr - 0.5
+        side_r = cb - 0.5
+        left = np.clip(mid + side_l, 0.0, 1.0)
+        right = np.clip(mid + side_r, 0.0, 1.0)
         return [left.astype(np.float32), right.astype(np.float32)]
 
     raise ValueError(f"Unsupported colorspace: {colorspace}")
@@ -180,22 +185,7 @@ def _image_to_impulse_flat(
         if remove_dc and h.size > 0:
             h = h - np.mean(h)
 
-        # normalization
-        if impulse_norm == "peak":
-            peak = float(np.max(np.abs(h))) if h.size > 0 else 0.0
-            if peak > 0:
-                h = h / peak
-        elif impulse_norm == "energy":
-            if h.size > 0:
-                rms = float(np.sqrt(np.mean(h**2)))
-            else:
-                rms = 0.0
-            if rms > 0:
-                h = h / (rms * np.sqrt(h.size))
-        elif impulse_norm == "none":
-            pass
-        else:
-            raise ValueError(f"Unknown impulse_norm: {impulse_norm}")
+        h = normalize_impulse(h, impulse_norm)
 
         impulses.append(h.astype(np.float32))
 
@@ -231,18 +221,7 @@ def _image_to_impulse_hist(
         if remove_dc:
             h = h - np.mean(h)
 
-        if impulse_norm == "peak":
-            peak = float(np.max(np.abs(h)))
-            if peak > 0:
-                h = h / peak
-        elif impulse_norm == "energy":
-            rms = float(np.sqrt(np.mean(h**2)))
-            if rms > 0:
-                h = h / (rms * np.sqrt(h.size))
-        elif impulse_norm == "none":
-            pass
-        else:
-            raise ValueError(f"Unknown impulse_norm: {impulse_norm}")
+        h = normalize_impulse(h, impulse_norm)
 
         impulses.append(h.astype(np.float32))
 
@@ -372,7 +351,7 @@ def _image_to_impulse_radial(
         profile = _radial_profile_from_bins(mag, bin_idx=bin_idx, n_bins=half_len)
 
         if smoothing == "hann":
-            profile = profile * np.hanning(profile.size).astype(np.float32)
+            profile = profile * hann(profile.size).astype(np.float32)
         elif smoothing == "none":
             pass
         else:
@@ -399,18 +378,7 @@ def _image_to_impulse_radial(
             H_half = profile.astype(np.float32) * np.exp(1j * phase)
         h = np.fft.irfft(H_half, n=impulse_len).astype(np.float32)
 
-        if impulse_norm == "peak":
-            peak = float(np.max(np.abs(h)))
-            if peak > 0:
-                h = h / peak
-        elif impulse_norm == "energy":
-            rms = float(np.sqrt(np.mean(h**2)))
-            if rms > 0:
-                h = h / (rms * np.sqrt(h.size))
-        elif impulse_norm == "none":
-            pass
-        else:
-            raise ValueError(f"Unknown impulse_norm: {impulse_norm}")
+        h = normalize_impulse(h, impulse_norm)
 
         impulses.append(h)
 
@@ -499,18 +467,7 @@ def _convolve_with_impulse(
         raise ValueError(f"Unknown pad_mode: {pad_mode}")
 
     # loudness normalization relative to input
-    if out_norm != "none":
-        in_peak = float(np.max(np.abs(x))) if x.size > 0 else 0.0
-        in_rms = float(np.sqrt(np.mean(x**2))) if x.size > 0 else 0.0
-        out_peak = float(np.max(np.abs(y))) if y.size > 0 else 0.0
-        out_rms = float(np.sqrt(np.mean(y**2))) if y.size > 0 else 0.0
-
-        if out_norm == "match_peak" and in_peak > 0 and out_peak > 0:
-            y = y * (in_peak / out_peak)
-        elif out_norm == "match_rms" and in_rms > 0 and out_rms > 0:
-            y = y * (in_rms / out_rms)
-        elif out_norm not in ("match_peak", "match_rms"):
-            raise ValueError(f"Unknown out_norm: {out_norm}")
+    y = normalize_to_reference(y, x, out_norm)
 
     # collapse back to mono if the output stayed mono
     if mono_input and y.shape[1] == 1:

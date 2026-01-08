@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple, Literal, overload, Optional
-import json
 import subprocess
 import tempfile
 from io import BytesIO
@@ -13,6 +12,16 @@ import numpy as np
 import soundfile as sf
 from tqdm import tqdm
 
+from exconv.dsp.crossfade import CrossfadeMode, crossfade_weights
+from exconv.dsp.envelopes import EnvelopeCurve, apply_adsr
+from exconv.dsp.segments import (
+    AudioLengthMode as DspAudioLengthMode,
+    slice_for_frame,
+    frame_range_samples,
+    match_audio_length,
+    audio_chunk_for_interval,
+)
+from exconv.video_meta import ffprobe_fps_info, parse_float
 from exconv.io import read_audio, write_audio, read_video_frames, write_video_frames
 from exconv.conv1d.audio import Audio, auto_convolve as audio_auto_convolve
 from .sound2image import spectral_sculpt, Mode, ColorMode
@@ -32,10 +41,15 @@ from .image2sound import (
 
 AudioVideoMode = Literal["per-buffer-auto", "original"]
 BlockStrategy = Literal["fixed", "beats", "novelty", "structure"]
+BlockEnvelopeCurve = EnvelopeCurve
+BlockCrossover = CrossfadeMode
+AudioLengthMode = DspAudioLengthMode
 
 __all__ = [
     "AudioVideoMode",
     "BlockStrategy",
+    "BlockEnvelopeCurve",
+    "BlockCrossover",
     "sound2image_video_arrays",
     "sound2image_video_from_files",
     "biconv_video_arrays",
@@ -61,104 +75,9 @@ def _ffmpeg_available() -> bool:
         return False
 
 
-_FFPROBE_AVAILABLE: bool | None = None
 _FPS_GUARD_RATIO = 1.2
 
 FPSPolicy = Literal["auto", "metadata", "avg_frame_rate", "r_frame_rate"]
-
-
-def _ffprobe_available() -> bool:
-    global _FFPROBE_AVAILABLE
-    if _FFPROBE_AVAILABLE is not None:
-        return _FFPROBE_AVAILABLE
-    try:
-        subprocess.run(
-            ["ffprobe", "-version"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        _FFPROBE_AVAILABLE = True
-    except (OSError, FileNotFoundError):
-        _FFPROBE_AVAILABLE = False
-    return _FFPROBE_AVAILABLE
-
-
-def _parse_fraction(val: object) -> Optional[float]:
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    text = str(val).strip()
-    if not text or text.lower() == "n/a":
-        return None
-    if "/" in text:
-        num, den = text.split("/", 1)
-        try:
-            num_f = float(num)
-            den_f = float(den)
-        except ValueError:
-            return None
-        if den_f == 0:
-            return None
-        return num_f / den_f
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _parse_float(val: object) -> Optional[float]:
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    text = str(val).strip()
-    if not text or text.lower() == "n/a":
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _ffprobe_fps_info(video_path: Path) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    if not _ffprobe_available():
-        return None, None, None
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=avg_frame_rate,r_frame_rate,duration:format=duration",
-        "-of",
-        "json",
-        str(video_path),
-    ]
-    try:
-        res = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except (OSError, FileNotFoundError):
-        return None, None, None
-    if res.returncode != 0 or not res.stdout:
-        return None, None, None
-    try:
-        data = json.loads(res.stdout.decode("utf-8", errors="ignore"))
-    except json.JSONDecodeError:
-        return None, None, None
-
-    streams = data.get("streams") or []
-    if not streams:
-        return None, None, None
-    stream = streams[0] or {}
-
-    avg = _parse_fraction(stream.get("avg_frame_rate"))
-    r = _parse_fraction(stream.get("r_frame_rate"))
-    duration = _parse_float(stream.get("duration"))
-    if duration is None:
-        duration = _parse_float((data.get("format") or {}).get("duration"))
-    return avg, r, duration
 
 
 def _resolve_fps_for_video(
@@ -175,14 +94,14 @@ def _resolve_fps_for_video(
             raise ValueError("fps must be > 0")
         return fps_val
 
-    meta_fps = _parse_float(meta.get("fps"))
-    meta_duration = _parse_float(meta.get("duration"))
+    meta_fps = parse_float(meta.get("fps"))
+    meta_duration = parse_float(meta.get("duration"))
 
     ff_avg: Optional[float] = None
     ff_r: Optional[float] = None
     ff_duration: Optional[float] = None
     if fps_policy != "metadata":
-        ff_avg, ff_r, ff_duration = _ffprobe_fps_info(video_path)
+        ff_avg, ff_r, ff_duration = ffprobe_fps_info(video_path)
 
     duration = meta_duration if meta_duration and meta_duration > 0 else ff_duration
     fps_from_frames: Optional[float] = None
@@ -292,98 +211,6 @@ def _extract_audio_from_video(
         ) from exc
 
 
-def _slice_for_frame(
-    frame_idx: int,
-    fps: float,
-    sr: int,
-    n_samples: int,
-) -> Tuple[int, int]:
-    """
-    Map a frame index to [start, stop) sample indices.
-
-    The mapping is based on continuous time:
-
-        t_start = frame_idx / fps
-        t_end   = (frame_idx + 1) / fps
-
-        start = round(t_start * sr)
-        stop  = round(t_end * sr)
-
-    and then clamped to [0, n_samples].
-    """
-    if fps <= 0:
-        raise ValueError(f"fps must be > 0, got {fps!r}")
-
-    t_start = frame_idx / fps
-    t_end = (frame_idx + 1) / fps
-
-    start = int(round(t_start * sr))
-    stop = int(round(t_end * sr))
-
-    start = max(0, min(start, n_samples))
-    stop = max(start, min(stop, n_samples))
-
-    return start, stop
-
-
-def _match_audio_length(
-    audio: np.ndarray,
-    target_len: int,
-    *,
-    mode: Literal["trim", "pad-zero", "pad-loop", "pad-noise", "center-zero"] = "pad-zero",
-) -> np.ndarray:
-    """
-    Trim or pad audio to target_len samples.
-    """
-    audio = np.asarray(audio, dtype=np.float32)
-    if audio.ndim == 1:
-        audio = audio[:, None]
-    n, c = audio.shape
-
-    if mode == "trim":
-        if n >= target_len:
-            return audio[:target_len]
-        pad = np.zeros((target_len - n, c), dtype=np.float32)
-        return np.concatenate([audio, pad], axis=0)
-
-    if mode == "pad-zero":
-        if n >= target_len:
-            return audio[:target_len]
-        pad = np.zeros((target_len - n, c), dtype=np.float32)
-        return np.concatenate([audio, pad], axis=0)
-
-    if mode == "center-zero":
-        if n >= target_len:
-            trim = (n - target_len) // 2
-            return audio[trim : trim + target_len]
-        pad_front = (target_len - n) // 2
-        pad_back = target_len - n - pad_front
-        front = np.zeros((pad_front, c), dtype=np.float32)
-        back = np.zeros((pad_back, c), dtype=np.float32)
-        return np.concatenate([front, audio, back], axis=0)
-
-    if mode == "pad-loop":
-        if n >= target_len:
-            return audio[:target_len]
-        reps = int(np.ceil(target_len / n))
-        tiled = np.tile(audio, (reps, 1))
-        return tiled[:target_len]
-
-    if mode == "pad-noise":
-        if n >= target_len:
-            return audio[:target_len]
-        pad_len = target_len - n
-        # noise scaled to 1% rms of existing audio or unity if silent
-        rms = float(np.sqrt(np.mean(audio**2))) if audio.size > 0 else 1.0
-        scale = 0.01 * rms if rms > 0 else 0.01
-        noise = np.random.default_rng().normal(0.0, scale, size=(pad_len, c)).astype(
-            np.float32
-        )
-        return np.concatenate([audio, noise], axis=0)
-
-    raise ValueError(f"Unknown audio length mode: {mode}")
-
-
 def _estimate_total_frames_from_meta(meta: dict, fps: float) -> int | None:
     """
     Best-effort estimate of total frames from imageio metadata.
@@ -423,111 +250,37 @@ def _read_video_meta(path: Path) -> dict:
         return {}
 
 
-def _audio_chunk_for_interval(
-    audio: np.ndarray,
-    start: int,
-    stop: int,
+def _block_overlap_sizes(
+    segments: Sequence[tuple[int, int]],
     *,
-    mode: AudioLengthMode,
-    rng: np.random.Generator,
-    noise_scale: float,
-    center_target_len: int | None = None,
-) -> np.ndarray:
-    """
-    Return audio[start:stop] for a logical timeline, applying padding strategy.
+    crossover: BlockCrossover,
+    crossover_frames: int,
+) -> list[int]:
+    if crossover == "none" or crossover_frames <= 0 or len(segments) < 2:
+        return [0 for _ in range(max(0, len(segments) - 1))]
+    overlaps: list[int] = []
+    lengths = [end - start + 1 for start, end in segments]
+    for idx in range(len(segments) - 1):
+        overlaps.append(int(min(crossover_frames, lengths[idx], lengths[idx + 1])))
+    return overlaps
 
-    Unlike `_slice_for_frame`, `start/stop` are NOT clamped to the source audio
-    length. This lets us implement pad/loop/noise without pre-materializing a
-    full-length padded array.
-    """
-    audio = np.asarray(audio, dtype=np.float32)
-    if audio.ndim == 1:
-        audio = audio[:, None]
 
-    if stop <= start:
-        return np.zeros((0, audio.shape[1]), dtype=np.float32)
-
-    n_samples, n_ch = audio.shape
-    need = int(stop - start)
-
-    if mode in ("trim", "pad-zero"):
-        # For our use (only requesting within video timeline), trim behaves like
-        # pad-zero: take what exists, and zero-pad past EOF.
-        if n_samples <= 0:
-            return np.zeros((need, n_ch), dtype=np.float32)
-        if start >= n_samples:
-            return np.zeros((need, n_ch), dtype=np.float32)
-        take_end = min(stop, n_samples)
-        head = audio[start:take_end, :]
-        if take_end >= stop:
-            return head.astype(np.float32, copy=False)
-        pad = np.zeros((stop - take_end, n_ch), dtype=np.float32)
-        return np.concatenate([head, pad], axis=0)
-
-    if mode == "pad-loop":
-        if n_samples <= 0:
-            return np.zeros((need, n_ch), dtype=np.float32)
-        out = np.empty((need, n_ch), dtype=np.float32)
-        pos = 0
-        cur = int(start)
-        while pos < need:
-            idx = cur % n_samples
-            take = min(need - pos, n_samples - idx)
-            out[pos : pos + take, :] = audio[idx : idx + take, :]
-            pos += take
-            cur += take
-        return out
-
-    if mode == "pad-noise":
-        if n_samples <= 0:
-            return rng.normal(0.0, noise_scale, size=(need, n_ch)).astype(np.float32)
-        if start >= n_samples:
-            return rng.normal(0.0, noise_scale, size=(need, n_ch)).astype(np.float32)
-        take_end = min(stop, n_samples)
-        head = audio[start:take_end, :]
-        if take_end >= stop:
-            return head.astype(np.float32, copy=False)
-        tail = rng.normal(0.0, noise_scale, size=(stop - take_end, n_ch)).astype(
-            np.float32
-        )
-        return np.concatenate([head, tail], axis=0)
-
-    if mode == "center-zero":
-        if center_target_len is None or center_target_len <= 0:
-            raise ValueError("center-zero requires a valid target duration")
-
-        target = int(center_target_len)
-        if need <= 0:
-            return np.zeros((0, n_ch), dtype=np.float32)
-
-        if n_samples >= target:
-            trim = (n_samples - target) // 2
-            src_start = trim + start
-            src_stop = trim + stop
-            src_start = max(0, min(src_start, n_samples))
-            src_stop = max(src_start, min(src_stop, n_samples))
-            head = audio[src_start:src_stop, :]
-            if head.shape[0] >= need:
-                return head[:need].astype(np.float32, copy=False)
-            pad = np.zeros((need - head.shape[0], n_ch), dtype=np.float32)
-            return np.concatenate([head, pad], axis=0)
-
-        pad_front = (target - n_samples) // 2
-        # Video timeline maps to audio index = t - pad_front
-        out = np.zeros((need, n_ch), dtype=np.float32)
-        src_start = start - pad_front
-        src_stop = stop - pad_front
-        # overlap with audio indices [0, n_samples)
-        a0 = max(0, src_start)
-        a1 = min(n_samples, src_stop)
-        if a1 <= a0:
-            return out
-        o0 = a0 - src_start
-        o1 = o0 + (a1 - a0)
-        out[o0:o1, :] = audio[a0:a1, :]
-        return out
-
-    raise ValueError(f"Unknown audio length mode: {mode}")
+def _blend_frames(
+    prev_frames: list[np.ndarray],
+    cur_frames: list[np.ndarray],
+    *,
+    mode: BlockCrossover,
+) -> list[np.ndarray]:
+    if not prev_frames or not cur_frames:
+        return []
+    n = min(len(prev_frames), len(cur_frames))
+    w_prev, w_cur = crossfade_weights(n, mode)
+    prev_arr = np.stack(prev_frames[:n], axis=0).astype(np.float32)
+    cur_arr = np.stack(cur_frames[:n], axis=0).astype(np.float32)
+    w_shape = (n,) + (1,) * (prev_arr.ndim - 1)
+    blended = prev_arr * w_prev.reshape(w_shape) + cur_arr * w_cur.reshape(w_shape)
+    blended = np.clip(blended, 0.0, 255.0).astype(np.uint8)
+    return [frame for frame in blended]
 
 
 def _segments_from_block_size(n_frames: int, block_size: int) -> list[tuple[int, int]]:
@@ -739,7 +492,7 @@ def sound2image_video_arrays(
         frame = np.asarray(frame)
 
         # --- slice audio for this frame ---
-        start, stop = _slice_for_frame(idx, fps, sr, n_samples)
+        start, stop = slice_for_frame(idx, fps, sr, n_samples)
 
         if stop > start:
             chunk = audio[start:stop, :]
@@ -927,6 +680,13 @@ def biconv_video_arrays(
     block_structure_max_frames: int = 600,
     block_bpm_min: float = 60.0,
     block_bpm_max: float = 200.0,
+    block_crossover: BlockCrossover = "none",
+    block_crossover_frames: int = 0,
+    block_adsr_attack_s: float = 0.0,
+    block_adsr_decay_s: float = 0.0,
+    block_adsr_sustain: float = 1.0,
+    block_adsr_release_s: float = 0.0,
+    block_adsr_curve: BlockEnvelopeCurve = "linear",
     # s2i color controls
     s2i_safe_color: bool = True,
     s2i_chroma_strength: float = 0.5,
@@ -970,10 +730,13 @@ def biconv_video_arrays(
 
     # match audio length to video duration
     ideal_len = int(round(len(frames) * sr / fps))
-    audio = _match_audio_length(audio, ideal_len, mode=audio_length_mode)
+    audio = match_audio_length(audio, ideal_len, mode=audio_length_mode)
     n_samples, _ = audio.shape
 
-    processed_frames: List[np.ndarray] = []
+    if block_crossover_frames < 0:
+        raise ValueError("block_crossover_frames must be >= 0")
+
+    frames_out: List[np.ndarray] = []
     audio_chunks: List[np.ndarray] = []
 
     n_frames = len(frames)
@@ -1006,6 +769,12 @@ def biconv_video_arrays(
         mir_bar.update(1)
         mir_bar.close()
 
+    block_overlaps = _block_overlap_sizes(
+        block_segments,
+        crossover=block_crossover,
+        crossover_frames=int(block_crossover_frames),
+    )
+
     block_iter = tqdm(
         block_segments,
         total=len(block_segments),
@@ -1013,16 +782,33 @@ def biconv_video_arrays(
         unit="block",
     )
 
-    for block_start, block_end in block_iter:
-        block_frames = [np.asarray(f) for f in frames[block_start : block_end + 1]]
+    prev_tail_frames: list[np.ndarray] = []
+    prev_tail_audio: np.ndarray | None = None
 
-        start, _ = _slice_for_frame(block_start, fps, sr, n_samples)
-        _, stop = _slice_for_frame(block_end, fps, sr, n_samples)
-        if stop <= start:
-            expected = max(1, int(round((block_end - block_start + 1) * sr / fps)))
+    for block_index, (block_start, block_end) in enumerate(block_iter):
+        prev_overlap = block_overlaps[block_index - 1] if block_index > 0 else 0
+        next_overlap = (
+            block_overlaps[block_index]
+            if block_index < len(block_overlaps)
+            else 0
+        )
+
+        ext_start = max(0, block_start - prev_overlap)
+        ext_end = min(n_frames - 1, block_end + next_overlap)
+        block_frames = [np.asarray(f) for f in frames[ext_start : ext_end + 1]]
+
+        ext_start_s, ext_stop_s = frame_range_samples(
+            ext_start,
+            ext_end,
+            sr=sr,
+            fps=fps,
+            n_samples=n_samples,
+        )
+        if ext_stop_s <= ext_start_s:
+            expected = max(1, int(round((ext_end - ext_start + 1) * sr / fps)))
             chunk = np.zeros((expected, audio.shape[1]), dtype=np.float32)
         else:
-            chunk = audio[start:stop, :]
+            chunk = audio[ext_start_s:ext_stop_s, :]
 
         # mean image for image->sound branch; stream to avoid large stacks and
         # ensure float32 0..1 so color handling (e.g., YCbCr mid/side) stays valid.
@@ -1147,15 +933,95 @@ def biconv_video_arrays(
         else:
             raise ValueError(f"Unknown serial_mode: {serial_mode}")
 
-        # push processed frames
-        processed_frames.extend(block_proc_frames_u8)
+        aud_proc_out = apply_adsr(
+            aud_proc,
+            sr,
+            attack_s=block_adsr_attack_s,
+            decay_s=block_adsr_decay_s,
+            sustain=block_adsr_sustain,
+            release_s=block_adsr_release_s,
+            curve=block_adsr_curve,
+        )
+        if aud_proc_out.ndim == 1:
+            aud_proc_out = aud_proc_out[:, None]
 
-        audio_chunks.append(aud_proc)
+        local_start = block_start - ext_start
+        local_end = block_end - ext_start
+        base_frames = block_proc_frames_u8[local_start : local_end + 1]
+        base_len = len(base_frames)
+
+        overlap_head = 0
+        if prev_overlap > 0 and prev_tail_frames:
+            overlap_head = min(prev_overlap, len(prev_tail_frames), base_len)
+        overlap_tail = 0
+        if next_overlap > 0 and base_len > overlap_head:
+            overlap_tail = min(next_overlap, base_len - overlap_head)
+
+        if overlap_head > 0:
+            cur_head = base_frames[:overlap_head]
+            frames_out.extend(_blend_frames(prev_tail_frames, cur_head, mode=block_crossover))
+        elif prev_overlap == 0 and prev_tail_frames:
+            frames_out.extend(prev_tail_frames)
+            prev_tail_frames = []
+
+        mid_start = overlap_head
+        mid_end = base_len - overlap_tail
+        if mid_end > mid_start:
+            frames_out.extend(base_frames[mid_start:mid_end])
+
+        prev_tail_frames = base_frames[mid_end:] if overlap_tail > 0 else []
+
+        def _audio_slice(start_frame: int, end_frame: int) -> np.ndarray:
+            if end_frame < start_frame:
+                return np.zeros((0, aud_proc_out.shape[1]), dtype=np.float32)
+            seg_start_s, seg_stop_s = frame_range_samples(
+                start_frame,
+                end_frame,
+                sr=sr,
+                fps=fps,
+                n_samples=n_samples,
+            )
+            local_seg_start = max(0, seg_start_s - ext_start_s)
+            local_seg_stop = max(local_seg_start, seg_stop_s - ext_start_s)
+            local_seg_stop = min(local_seg_stop, aud_proc_out.shape[0])
+            return aud_proc_out[local_seg_start:local_seg_stop, :]
+
+        if overlap_head > 0:
+            cur_head_audio = _audio_slice(block_start, block_start + overlap_head - 1)
+            if prev_tail_audio is not None:
+                blend_len = min(prev_tail_audio.shape[0], cur_head_audio.shape[0])
+                w_prev, w_cur = crossfade_weights(blend_len, block_crossover)
+                w_prev = w_prev[:, None]
+                w_cur = w_cur[:, None]
+                blended = prev_tail_audio[:blend_len, :] * w_prev + cur_head_audio[:blend_len, :] * w_cur
+                audio_chunks.append(blended.astype(np.float32))
+            elif cur_head_audio.size > 0:
+                audio_chunks.append(cur_head_audio)
+        elif overlap_head == 0 and prev_tail_audio is not None:
+            audio_chunks.append(prev_tail_audio)
+
+        mid_start_frame = block_start + overlap_head
+        mid_end_frame = block_end - overlap_tail
+        if mid_end_frame >= mid_start_frame:
+            mid_audio = _audio_slice(mid_start_frame, mid_end_frame)
+            if mid_audio.size > 0:
+                audio_chunks.append(mid_audio)
+
+        if overlap_tail > 0:
+            tail_start = block_end - overlap_tail + 1
+            prev_tail_audio = _audio_slice(tail_start, block_end)
+        else:
+            prev_tail_audio = None
+
+    if prev_tail_frames:
+        frames_out.extend(prev_tail_frames)
+    if prev_tail_audio is not None:
+        audio_chunks.append(prev_tail_audio)
 
     audio_out = np.concatenate(audio_chunks, axis=0) if audio_chunks else np.zeros(
         (0, audio.shape[1]), dtype=np.float32
     )
-    return processed_frames, audio_out.astype(np.float32)
+    return frames_out, audio_out.astype(np.float32)
 
 
 def biconv_video_from_files(
@@ -1192,6 +1058,13 @@ def biconv_video_from_files(
     block_structure_max_frames: int = 600,
     block_bpm_min: float = 60.0,
     block_bpm_max: float = 200.0,
+    block_crossover: BlockCrossover = "none",
+    block_crossover_frames: int = 0,
+    block_adsr_attack_s: float = 0.0,
+    block_adsr_decay_s: float = 0.0,
+    block_adsr_sustain: float = 1.0,
+    block_adsr_release_s: float = 0.0,
+    block_adsr_curve: BlockEnvelopeCurve = "linear",
     s2i_safe_color: bool = True,
     s2i_chroma_strength: float = 0.5,
     s2i_chroma_clip: float = 0.25,
@@ -1267,6 +1140,13 @@ def biconv_video_from_files(
         block_structure_max_frames=block_structure_max_frames,
         block_bpm_min=block_bpm_min,
         block_bpm_max=block_bpm_max,
+        block_crossover=block_crossover,
+        block_crossover_frames=block_crossover_frames,
+        block_adsr_attack_s=block_adsr_attack_s,
+        block_adsr_decay_s=block_adsr_decay_s,
+        block_adsr_sustain=block_adsr_sustain,
+        block_adsr_release_s=block_adsr_release_s,
+        block_adsr_curve=block_adsr_curve,
         s2i_safe_color=s2i_safe_color,
         s2i_chroma_strength=s2i_chroma_strength,
         s2i_chroma_clip=s2i_chroma_clip,
@@ -1371,6 +1251,13 @@ def biconv_video_to_files_stream(
     block_structure_max_frames: int = 600,
     block_bpm_min: float = 60.0,
     block_bpm_max: float = 200.0,
+    block_crossover: BlockCrossover = "none",
+    block_crossover_frames: int = 0,
+    block_adsr_attack_s: float = 0.0,
+    block_adsr_decay_s: float = 0.0,
+    block_adsr_sustain: float = 1.0,
+    block_adsr_release_s: float = 0.0,
+    block_adsr_curve: BlockEnvelopeCurve = "linear",
     s2i_safe_color: bool = True,
     s2i_chroma_strength: float = 0.5,
     s2i_chroma_clip: float = 0.25,
@@ -1393,6 +1280,8 @@ def biconv_video_to_files_stream(
     """
     if block_size <= 0:
         raise ValueError("block_size must be positive")
+    if block_crossover_frames < 0:
+        raise ValueError("block_crossover_frames must be >= 0")
 
     video_path = _as_path(video_path)
     audio_used: Path | None = _as_path(audio_path) if audio_path else None
@@ -1480,6 +1369,12 @@ def biconv_video_to_files_stream(
     block_sizes: list[int] | None = None
     if block_segments:
         block_sizes = [end - start + 1 for start, end in block_segments]
+
+    block_overlaps = _block_overlap_sizes(
+        block_segments,
+        crossover=block_crossover,
+        crossover_frames=int(block_crossover_frames),
+    )
 
     # --- writers / temp paths ---
     out_video_p: Path | None = _as_path(out_video) if out_video is not None else None
@@ -1583,8 +1478,42 @@ def biconv_video_to_files_stream(
             unit="block",
         )
 
+        def _write_frames(frames_list: list[np.ndarray]) -> None:
+            nonlocal n_frames_written
+            if not frames_list:
+                return
+            for frame in frames_list:
+                if video_writer is not None:
+                    video_writer.append_data(frame)
+                n_frames_written += 1
+
+        def _write_audio(seg: np.ndarray) -> None:
+            nonlocal audio_writer, audio_channels_written, audio_samples_written
+            if temp_audio is None or seg.size == 0:
+                return
+            if seg.ndim == 1:
+                seg = seg[:, None]
+            if audio_writer is None:
+                audio_channels_written = int(seg.shape[1])
+                audio_writer = sf.SoundFile(
+                    str(temp_audio),
+                    mode="w",
+                    samplerate=int(sr),
+                    channels=audio_channels_written,
+                    subtype="PCM_16",
+                )
+            to_write = np.asarray(seg, dtype=np.float32)
+            to_write = np.clip(to_write, -1.0, 1.0)
+            audio_writer.write(to_write)
+            audio_samples_written += int(to_write.shape[0])
+
         block_start = 0
         block_sizes_iter = iter(block_sizes) if block_sizes else None
+        carry_frames: list[np.ndarray] = []
+        prev_tail_frames: list[np.ndarray] = []
+        prev_tail_audio: np.ndarray | None = None
+        block_index = 0
+
         while True:
             if block_sizes_iter is not None:
                 try:
@@ -1597,37 +1526,71 @@ def biconv_video_to_files_stream(
             if block_target <= 0:
                 block_target = 1
 
-            # read frames for this block
-            block_frames: list[np.ndarray] = []
-            for _ in range(block_target):
+            next_overlap = 0
+            if block_overlaps:
+                if block_index < len(block_overlaps):
+                    next_overlap = int(block_overlaps[block_index])
+            elif block_crossover != "none" and block_crossover_frames > 0:
+                next_overlap = min(int(block_crossover_frames), block_target)
+
+            if len(carry_frames) > block_target:
+                carry_frames = carry_frames[-block_target:]
+            prev_overlap = len(carry_frames)
+            base_needed = max(0, block_target - prev_overlap)
+            read_target = base_needed + next_overlap
+
+            fresh_frames: list[np.ndarray] = []
+            for _ in range(read_target):
                 try:
                     f = next(frame_iter)
                 except StopIteration:
                     break
-                block_frames.append(np.asarray(f))
+                fresh_frames.append(np.asarray(f))
 
-            if not block_frames:
+            if not fresh_frames and not carry_frames:
                 break
 
-            block_end = block_start + len(block_frames) - 1
+            if len(fresh_frames) < base_needed:
+                base_needed = len(fresh_frames)
+                block_target = prev_overlap + base_needed
+                next_overlap = 0
 
-            # map frame interval -> audio interval (unclamped)
-            start_s = int(round(block_start * sr / fps_used))
-            stop_s = int(round((block_end + 1) * sr / fps_used))
-            if stop_s <= start_s:
-                stop_s = start_s + max(1, int(round(len(block_frames) * sr / fps_used)))
+            current_frames = fresh_frames[:base_needed]
+            next_carry = fresh_frames[base_needed : base_needed + next_overlap]
 
-            chunk = _audio_chunk_for_interval(
-                audio,
-                start_s,
-                stop_s,
-                mode=audio_length_mode,
-                rng=rng,
-                noise_scale=noise_scale,
-                center_target_len=center_target_len,
+            if block_target <= 0:
+                break
+            if not current_frames and not carry_frames:
+                break
+
+            block_frames = [*carry_frames, *current_frames, *next_carry]
+            block_end = block_start + block_target - 1
+
+            ext_start = max(0, block_start - prev_overlap)
+            ext_end = block_end + len(next_carry)
+            ext_start_s, ext_stop_s = frame_range_samples(
+                ext_start,
+                ext_end,
+                sr=sr,
+                fps=fps_used,
+                n_samples=None,
             )
+            if ext_stop_s <= ext_start_s:
+                expected = max(
+                    1, int(round((ext_end - ext_start + 1) * sr / fps_used))
+                )
+                chunk = np.zeros((expected, audio.shape[1]), dtype=np.float32)
+            else:
+                chunk = audio_chunk_for_interval(
+                    audio,
+                    ext_start_s,
+                    ext_stop_s,
+                    mode=audio_length_mode,
+                    rng=rng,
+                    noise_scale=noise_scale,
+                    center_target_len=center_target_len,
+                )
 
-            # mean image for image->sound branch (float32 0..1)
             img_sum = None
             for frame_arr in block_frames:
                 arr_f = np.asarray(frame_arr, dtype=np.float32)
@@ -1638,6 +1601,7 @@ def biconv_video_to_files_stream(
                 img_sum += arr_f
             img_mean = img_sum / len(block_frames) if img_sum is not None else np.zeros((1,), dtype=np.float32)
 
+            block_proc_frames_u8: list[np.ndarray] = []
             if serial_mode == "parallel":
                 for frame_arr in block_frames:
                     img_proc = spectral_sculpt(
@@ -1651,10 +1615,7 @@ def biconv_video_to_files_stream(
                         chroma_clip=s2i_chroma_clip,
                         normalize=True,
                     )
-                    frame_u8 = _to_uint8_frame(img_proc)
-                    if video_writer is not None:
-                        video_writer.append_data(frame_u8)
-                    n_frames_written += 1
+                    block_proc_frames_u8.append(_to_uint8_frame(img_proc))
 
                 aud_proc = _image2sound_apply(
                     img=img_mean,
@@ -1691,15 +1652,11 @@ def biconv_video_to_files_stream(
                     if img_mean_proc_sum is None:
                         img_mean_proc_sum = np.zeros_like(img_proc_f, dtype=np.float32)
                     img_mean_proc_sum += img_proc_f
-
-                    frame_u8 = _to_uint8_frame(img_proc)
-                    if video_writer is not None:
-                        video_writer.append_data(frame_u8)
-                    n_frames_written += 1
+                    block_proc_frames_u8.append(_to_uint8_frame(img_proc))
 
                 img_mean_proc = (
-                    img_mean_proc_sum / len(block_frames)
-                    if img_mean_proc_sum is not None and len(block_frames) > 0
+                    img_mean_proc_sum / len(block_proc_frames_u8)
+                    if img_mean_proc_sum is not None and len(block_proc_frames_u8) > 0
                     else img_mean
                 )
 
@@ -1746,33 +1703,98 @@ def biconv_video_to_files_stream(
                         chroma_clip=s2i_chroma_clip,
                         normalize=True,
                     )
-                    frame_u8 = _to_uint8_frame(img_proc)
-                    if video_writer is not None:
-                        video_writer.append_data(frame_u8)
-                    n_frames_written += 1
+                    block_proc_frames_u8.append(_to_uint8_frame(img_proc))
             else:
                 raise ValueError(f"Unknown serial_mode: {serial_mode}")
 
-            # write audio chunk if requested
-            if temp_audio is not None:
-                if aud_proc.ndim == 1:
-                    aud_proc = aud_proc[:, None]
-                if audio_writer is None:
-                    audio_channels_written = int(aud_proc.shape[1])
-                    audio_writer = sf.SoundFile(
-                        str(temp_audio),
-                        mode="w",
-                        samplerate=int(sr),
-                        channels=audio_channels_written,
-                        subtype="PCM_16",
-                    )
-                to_write = np.asarray(aud_proc, dtype=np.float32)
-                to_write = np.clip(to_write, -1.0, 1.0)
-                audio_writer.write(to_write)
-                audio_samples_written += int(aud_proc.shape[0])
+            aud_proc_out = apply_adsr(
+                aud_proc,
+                sr,
+                attack_s=block_adsr_attack_s,
+                decay_s=block_adsr_decay_s,
+                sustain=block_adsr_sustain,
+                release_s=block_adsr_release_s,
+                curve=block_adsr_curve,
+            )
+            if aud_proc_out.ndim == 1:
+                aud_proc_out = aud_proc_out[:, None]
 
+            local_start = block_start - ext_start
+            local_end = local_start + block_target - 1
+            base_frames = block_proc_frames_u8[local_start : local_end + 1]
+            base_len = len(base_frames)
+
+            overlap_head = 0
+            if prev_overlap > 0 and prev_tail_frames:
+                overlap_head = min(prev_overlap, len(prev_tail_frames), base_len)
+            overlap_tail = 0
+            if len(next_carry) > 0 and base_len > overlap_head:
+                overlap_tail = min(len(next_carry), base_len - overlap_head)
+
+            if overlap_head > 0:
+                cur_head = base_frames[:overlap_head]
+                _write_frames(_blend_frames(prev_tail_frames, cur_head, mode=block_crossover))
+            elif prev_overlap == 0 and prev_tail_frames:
+                _write_frames(prev_tail_frames)
+                prev_tail_frames = []
+
+            mid_start = overlap_head
+            mid_end = base_len - overlap_tail
+            if mid_end > mid_start:
+                _write_frames(base_frames[mid_start:mid_end])
+
+            prev_tail_frames = base_frames[mid_end:] if overlap_tail > 0 else []
+
+            def _audio_slice(start_frame: int, end_frame: int) -> np.ndarray:
+                if end_frame < start_frame:
+                    return np.zeros((0, aud_proc_out.shape[1]), dtype=np.float32)
+                seg_start_s, seg_stop_s = frame_range_samples(
+                    start_frame,
+                    end_frame,
+                    sr=sr,
+                    fps=fps_used,
+                    n_samples=None,
+                )
+                local_seg_start = max(0, seg_start_s - ext_start_s)
+                local_seg_stop = max(local_seg_start, seg_stop_s - ext_start_s)
+                local_seg_stop = min(local_seg_stop, aud_proc_out.shape[0])
+                return aud_proc_out[local_seg_start:local_seg_stop, :]
+
+            if overlap_head > 0:
+                cur_head_audio = _audio_slice(block_start, block_start + overlap_head - 1)
+                if prev_tail_audio is not None:
+                    blend_len = min(prev_tail_audio.shape[0], cur_head_audio.shape[0])
+                    w_prev, w_cur = crossfade_weights(blend_len, block_crossover)
+                    w_prev = w_prev[:, None]
+                    w_cur = w_cur[:, None]
+                    blended = prev_tail_audio[:blend_len, :] * w_prev + cur_head_audio[:blend_len, :] * w_cur
+                    _write_audio(blended.astype(np.float32))
+                elif cur_head_audio.size > 0:
+                    _write_audio(cur_head_audio)
+            elif overlap_head == 0 and prev_tail_audio is not None:
+                _write_audio(prev_tail_audio)
+
+            mid_start_frame = block_start + overlap_head
+            mid_end_frame = block_end - overlap_tail
+            if mid_end_frame >= mid_start_frame:
+                mid_audio = _audio_slice(mid_start_frame, mid_end_frame)
+                _write_audio(mid_audio)
+
+            if overlap_tail > 0:
+                tail_start = block_end - overlap_tail + 1
+                prev_tail_audio = _audio_slice(tail_start, block_end)
+            else:
+                prev_tail_audio = None
+
+            carry_frames = next_carry
             block_start = block_end + 1
+            block_index += 1
             block_iter.update(1)
+
+        if prev_tail_frames:
+            _write_frames(prev_tail_frames)
+        if prev_tail_audio is not None:
+            _write_audio(prev_tail_audio)
 
         block_iter.close()
     finally:

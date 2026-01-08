@@ -16,7 +16,7 @@ except Exception:
     __version__ = "0.0.0.dev0"
 
 # Re-export core for convenience
-from . import core, io, conv1d, conv2d  # noqa: E402
+from . import core, io, conv1d, conv2d, dsp  # noqa: E402
 
-__all__ = ["core", "io", "conv1d", "conv2d", "__version__"]
+__all__ = ["core", "io", "conv1d", "conv2d", "dsp", "__version__"]
 

@@ -6,6 +6,7 @@ from typing import Literal, Tuple
 import numpy as np
 
 from exconv.core import fftnd, ifftnd, radial_grid_2d
+from exconv.dsp.normalize import normalize_range_01, normalize_chroma_midpoint, clip_01
 from exconv.io import rgb_to_luma, luma_to_rgb, to_stereo
 
 Mode = Literal["mono", "stereo", "mid-side"]
@@ -51,14 +52,16 @@ def _radial_filter_from_curve(curve: np.ndarray, H: int, W: int) -> np.ndarray:
 def _rgb_to_ycbcr(rgb: np.ndarray) -> np.ndarray:
     """
     Convert RGB image in [0,1] to YCbCr (approx. BT.601).
+    Cb/Cr are offset by +0.5 so neutral chroma sits at 0.5, which keeps
+    intermediate filtering/clipping in image-space [0,1] well-behaved.
     Returns same shape (H,W,3).
     """
     rgb = np.asarray(rgb, dtype=np.float32)
     r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
 
-    Y  = 0.299 * r + 0.587 * g + 0.114 * b
-    Cb = -0.168736 * r - 0.331264 * g + 0.5 * b + 0.5
-    Cr = 0.5 * r - 0.418688 * g - 0.081312 * b + 0.5
+    Y = 0.299 * r + 0.587 * g + 0.114 * b
+    Cb = 0.564 * (b - Y) + 0.5
+    Cr = 0.713 * (r - Y) + 0.5
 
     return np.stack([Y, Cb, Cr], axis=-1).astype(np.float32)
 
@@ -78,31 +81,6 @@ def _ycbcr_to_rgb(ycbcr: np.ndarray) -> np.ndarray:
     return np.stack([r, g, b], axis=-1).astype(np.float32)
 
 
-def _normalize_01_global(x: np.ndarray) -> np.ndarray:
-    """Rescale array to 0..1 using global min/max; if flat, return zeros."""
-    x = np.asarray(x, dtype=np.float32)
-    xmin = float(np.min(x))
-    xmax = float(np.max(x))
-    if xmax - xmin < 1e-8:
-        return np.zeros_like(x, dtype=np.float32)
-    return ((x - xmin) / (xmax - xmin)).astype(np.float32)
-
-
-def _normalize_chroma(ch: np.ndarray) -> np.ndarray:
-    """
-    Center chroma around 0.5 and squash extremes to avoid dominant casts.
-    Uses 99th percentile of |delta| as scale, maps to +/-0.25 range.
-    """
-    ch = np.asarray(ch, dtype=np.float32) - 0.5
-    if ch.size == 0:
-        return np.zeros_like(ch, dtype=np.float32)
-    scale = float(np.percentile(np.abs(ch), 99.0))
-    if scale > 1e-8:
-        ch = ch / scale * 0.25
-    ch = np.clip(ch + 0.5, 0.0, 1.0)
-    return ch.astype(np.float32)
-
-
 def _fft_filter_apply(img2d: np.ndarray, H2: np.ndarray) -> np.ndarray:
     """
     2D FFT filter: FFT2 -> multiply -> IFFT2 (real).
@@ -115,45 +93,6 @@ def _fft_filter_apply(img2d: np.ndarray, H2: np.ndarray) -> np.ndarray:
     Y = F * H2
     y = ifftnd(Y, axes=(0, 1), real_output=False)
     return y.real.astype(np.float32)
-
-
-def _normalize_01_global(x: np.ndarray) -> np.ndarray:
-    """
-    Normalize an array globally to [0,1] (single min/max for all values).
-    Good for grayscale/luma images.
-    """
-    x = np.asarray(x, dtype=np.float32)
-    if x.size == 0:
-        return x
-    xmin = float(x.min())
-    xmax = float(x.max())
-    if xmax > xmin:
-        x = (x - xmin) / (xmax - xmin)
-    return np.clip(x, 0.0, 1.0)
-
-
-def _clip_01(x: np.ndarray) -> np.ndarray:
-    """
-    Just clip to [0,1] without rescaling.
-    Better for color images if we want to preserve hue relationships.
-    """
-    x = np.asarray(x, dtype=np.float32)
-    return np.clip(x, 0.0, 1.0)
-
-
-def _normalize_chroma(ch: np.ndarray) -> np.ndarray:
-    """
-    Center chroma around 0.5 and squash extremes to avoid dominant casts.
-    Uses 99th percentile of |delta| as scale, maps to +/-0.25 range.
-    """
-    ch = np.asarray(ch, dtype=np.float32) - 0.5
-    if ch.size == 0:
-        return np.zeros_like(ch, dtype=np.float32)
-    scale = float(np.percentile(np.abs(ch), 99.0))
-    if scale > 1e-8:
-        ch = ch / scale * 0.25
-    ch = np.clip(ch + 0.5, 0.0, 1.0)
-    return ch.astype(np.float32)
 
 
 # ---------------------------------------------------------------------
@@ -345,7 +284,7 @@ def spectral_sculpt(
         y = _fft_filter_apply(luma, H_luma)
 
         if normalize:
-            y = _normalize_01_global(y)
+            y = normalize_range_01(y)
 
         if orig_ndim == 3:
             # expand back to RGB to match input shape
@@ -400,17 +339,17 @@ def spectral_sculpt(
         if safe_color:
             # Normalize Y globally, squash chroma, then clip RGB
             ycbcr_norm = np.empty_like(ycbcr_f)
-            ycbcr_norm[..., 0] = _normalize_01_global(ycbcr_f[..., 0])
-            ycbcr_norm[..., 1] = _normalize_chroma(ycbcr_f[..., 1])
-            ycbcr_norm[..., 2] = _normalize_chroma(ycbcr_f[..., 2])
+            ycbcr_norm[..., 0] = normalize_range_01(ycbcr_f[..., 0])
+            ycbcr_norm[..., 1] = normalize_chroma_midpoint(ycbcr_f[..., 1])
+            ycbcr_norm[..., 2] = normalize_chroma_midpoint(ycbcr_f[..., 2])
             # hard clamp chroma around 0.5
             clip = max(0.0, float(chroma_clip))
             if clip > 0.0:
                 ycbcr_norm[..., 1] = np.clip(ycbcr_norm[..., 1], 0.5 - clip, 0.5 + clip)
                 ycbcr_norm[..., 2] = np.clip(ycbcr_norm[..., 2], 0.5 - clip, 0.5 + clip)
             rgb_out = _ycbcr_to_rgb(ycbcr_norm)
-            rgb_out = _clip_01(rgb_out)
+            rgb_out = clip_01(rgb_out)
         else:
-            rgb_out = _clip_01(rgb_out)
+            rgb_out = clip_01(rgb_out)
 
     return rgb_out

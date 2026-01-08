@@ -4,6 +4,8 @@ from typing import Literal, Sequence
 import math
 
 import numpy as np
+
+from exconv.dsp.windows import hann
 from scipy.signal import fftconvolve, find_peaks, stft
 
 BlockStrategy = Literal["fixed", "beats", "novelty", "structure"]
@@ -38,7 +40,7 @@ def _stft_mag(
         fs=float(sr),
         nperseg=nperseg,
         noverlap=noverlap,
-        window="hann",
+        window=hann(nperseg),
         boundary=None,
         padded=False,
     )
@@ -197,7 +199,7 @@ def structure_novelty(
         novelty = np.zeros((n_frames,), dtype=np.float32)
         return novelty, stride
 
-    win = np.hanning(2 * k)
+    win = hann(2 * k)
     weight = np.outer(win, win).astype(np.float32)
     kernel = np.ones((2 * k, 2 * k), dtype=np.float32)
     kernel[:k, :k] = 1.0
