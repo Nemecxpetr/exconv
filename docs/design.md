@@ -200,7 +200,7 @@ Gamma is applied *after* convolution, on the final 3-channel image.
 
 ---
 
-## 6. Cross-modal mapping: sound  image
+## 6. Cross-modal mapping: sound -> image
 
 Cross-modal processing lives in `exconv.xmodal.sound2image`. The goal is to
 sculpt an image using spectral information from an audio signal, in a way
@@ -229,27 +229,29 @@ Steps (conceptually):
    - Start from mono `(N,)` or multi-channel `(N, C)` audio.
    - Convert to stereo deterministically with `to_stereo` if needed, so that
      `L` and `R` always exist.
-   - Derive:
-     - `mono = (L + R) / 2`
-     - `mid  = (L + R) / 2`
-     - `sideL = L - mid`, `sideR = R - mid`.
+   - Derive:
+     - `mono = (L + R) / 2`
+     - `mid  = (L + R) / 2`
+     - `sideL = L - mid`, `sideR = R - mid`.
+     - Equivalently `sideL = (L - R) / 2`, `sideR = (R - L) / 2`.
 
-2. **Spectra** via `_rfft_magnitude`:
-   - 1D real FFT (`rfft`) of each signal  magnitude  normalized to max=1.  
-   - Silent input  return an all-ones curve (identity filter).
+2. **Spectra** via `_rfft_magnitude`:
+   - 1D real FFT (`rfft`) of each signal  magnitude  normalized to max=1.  
+     `S[k] = |rfft(x)[k]| / max_k |rfft(x)[k]|`.
+   - Silent input  return an all-ones curve (identity filter).
 
-3. **Radial filters** via `_radial_filter_from_curve`:
-   - Construct a 2D radius grid `` in `[0,1]` using `radial_grid_2d(H, W)`.  
-   - Map `curve` indices along ``:
+3. **Radial filters** via `_radial_filter_from_curve`:
+   - Construct a 2D radius grid `rho` in `[0,1]` using `radial_grid_2d(H, W)`.  
+   - Map `curve` indices along `rho`:
 
      ```txt
-     idx = int( * (F - 1))
-     H2 = curve[idx]  # shape (H, W)
+     idx = int(rho * (F - 1))
+     H2 = curve[idx]  # shape (H, W)
      ```
 
    - This yields isotropic ring patterns that encode the audio spectrum.
 
-ASCII sketch of ``:
+ASCII sketch of `rho`:
 
 ```txt
  = 0      0.25     0.5     0.75      1.0
@@ -292,12 +294,20 @@ Normalization:
 #### `colorspace="color"`
 
 - We first ensure a 3-channel RGB representation (2D  replicated RGB).  
-- Convert RGB  YCbCr using `_rgb_to_ycbcr` / `_ycbcr_to_rgb`.
-
-  ```txt
-  RGB  Y, Cb, Cr
-  ```
-
+- Convert RGB  YCbCr using `_rgb_to_ycbcr` / `_ycbcr_to_rgb`.
+
+  ```txt
+  RGB  Y, Cb, Cr
+  ```
+
+  (approx. BT.601)
+
+  ```txt
+  Y  = 0.299 R + 0.587 G + 0.114 B
+  Cb = -0.168736 R - 0.331264 G + 0.5 B + 0.5
+  Cr = 0.5 R - 0.418688 G - 0.081312 B + 0.5
+  ```
+
 - Filters are assigned as:
 
   | `mode`     | Y filter        | Cb filter      | Cr filter      |
@@ -306,14 +316,142 @@ Normalization:
   | `"stereo"`| `H_mono`        | `H_L`          | `H_R`          |
   | `"mid-side"` | `H_mid`     | `H_sideL`      | `H_sideR`      |
 
-- We recombine to YCbCr, clip softly, convert back to RGB and (optionally)
-  clip to `[0,1]`.
-
-This design keeps all the interesting stereo logic in the 2D filter
-construction, while the image path is just apply this scalar filter to
-chosen channels.
-
----
+- We recombine to YCbCr, clip softly, convert back to RGB and (optionally)
+  clip to `[0,1]`.
+
+#### Safe-color controls (s2i-safe-color, s2i-chroma-*)
+
+These only affect `colorspace="color"`:
+
+- `s2i-chroma-strength` blends filtered chroma with the original:
+  `Cb = (1-a) * Cb_orig + a * Cb_filt` (same for `Cr`), with `a` in `[0,1]`.
+- `s2i-safe-color` normalizes Y and squashes chroma extremes before RGB:
+  - `Y` is globally rescaled to `[0,1]`.
+  - For chroma, compute `d = Cb - 0.5` (or `Cr - 0.5`), scale by the
+    99th percentile of `|d|` so that `|d|` maps to `0.25`, then re-center.
+- `s2i-chroma-clip` clamps chroma around neutral:
+  `Cb, Cr = clip(Cb, 0.5 - clip, 0.5 + clip)`.
+- With `s2i-safe-color` disabled, we skip Y/chroma normalization and only
+  clip RGB to `[0,1]` when `normalize=True`.
+- With `normalize=False`, no rescale or clipping is applied.
+
+This design keeps all the interesting stereo logic in the 2D filter
+construction, while the image path is just apply this scalar filter to
+chosen channels.
+
+### 6.3 Image -> sound (i2s)
+
+Image->sound lives in `exconv.xmodal.image2sound`. It derives an impulse
+response `h[n]` from the image, then applies 1D linear convolution to audio:
+
+```txt
+y[n] = sum_k x[k] * h[n - k]
+```
+
+The pipeline:
+
+1. Convert the image into 1 or 2 scalar channels based on `i2s-colorspace`.
+2. Build a 1D impulse per channel according to `i2s-mode`.
+3. Convolve audio with the impulse (FFT-based), then crop via `i2s-pad-mode`.
+4. Optionally normalize output loudness via `i2s-out-norm`.
+
+#### Colorspace mapping (i2s-colorspace)
+
+These determine whether the impulse is mono or stereo:
+
+- `luma` (mono): Rec.709 luma  
+  `Y = 0.2126 R + 0.7152 G + 0.0722 B`
+- `rgb-mean` (mono): `Y = (R + G + B) / 3`
+- `rgb-stereo` (stereo): left = `R`, right = `B` (if no `B`, repeat `R`)
+- `ycbcr-mid-side` (stereo):
+  ```txt
+  Y  = 0.299 R + 0.587 G + 0.114 B
+  Cb = 0.564 (B - Y) + 0.5
+  Cr = 0.713 (R - Y) + 0.5
+  L  = clip(Y + (Cr - 0.5))
+  R  = clip(Y + (Cb - 0.5))
+  ```
+
+#### Impulse modes (i2s-mode)
+
+- `flat`  flatten grayscale values into a 1D impulse  
+  `h = g.ravel()` (optionally decimated for length control).  
+  Optional DC removal: `h = h - mean(h)`.
+
+- `hist`  histogram of grayscale values  
+  `h[b] = count{ g in bin b }` for `b = 0..n_bins-1`.  
+  Impulse length is `n_bins`.
+
+- `radial`  FFT magnitude radial profile  
+  ```txt
+  G(u,v) = FFT2(g)
+  M(u,v) = |shift(G)|
+  p[k]   = mean{ M(u,v) : bin(u,v) == k }
+  ```
+  with radial binning (linear or log) and optional Hann smoothing.
+
+#### Radial options (i2s-radius-mode, i2s-phase-mode, i2s-smoothing)
+
+- `i2s-radius-mode`:
+  - `linear`: `bin = floor(r * (K - 1))`
+  - `log`: `bin = floor(log1p(9 r) / log1p(9) * (K - 1))`
+- `i2s-smoothing`:
+  - `hann`: multiply `p[k]` by a Hann window.
+  - `none`: no smoothing.
+- `i2s-phase-mode` (radial only):
+  - `zero`  `phi[k] = 0`.
+  - `random`  `phi[k] ~ U(-pi, pi)` per bin.
+  - `image`  circular-mean phase per radial bin:  
+    `phi[k] = angle(mean(exp(1j * theta(u,v))))`.
+  - `spiral`  deterministic spiral walk from center to edges; picks phases
+    in that order to form `phi[k]`.
+  - `min-phase`  minimum-phase reconstruction:  
+    `c = irfft(log(|H|))`, then `H_min = exp(rfft(c_min))` where
+    `c_min` doubles positive quefrencies.
+
+Then `H_half[k] = p[k] * exp(1j * phi[k])`, and the impulse is
+`h = irfft(H_half, n=impulse_len)`.
+
+#### Length, padding, normalization (i2s-impulse-len, i2s-pad-mode, i2s-*)
+
+- `i2s-impulse-len`:
+  - `int`  fixed impulse length (radial mode).
+  - `auto`  set to the audio length `N` (radial mode).
+  - `frame`  in video-biconv, `impulse_len = round(sr / fps)`.
+- `i2s-impulse-norm`:
+  - `peak`  divide by max abs.
+  - `energy`  divide by L2 norm (`rms * sqrt(N)`), so `||h||_2 = 1`.
+  - `none`  no scaling.
+- `i2s-pad-mode`:
+  - `full`  length `N + K - 1`.
+  - `same-first`  first `N` samples.
+  - `same-center`  centered window of length `N`.
+- `i2s-out-norm` rescales the output to match input loudness:
+  - `match_peak`  `y *= peak(x) / peak(y)`.
+  - `match_rms`  `y *= rms(x) / rms(y)`.
+  - `none`  no scaling.
+
+### 6.4 Video bi-conv blocks
+
+`biconv_video_*` groups frames into blocks so audio and video stay aligned.
+
+- Block boundaries are frame indices. In `fixed`, they come from `block_size`
+
+  (or `block_size_div`); in `beats`/`novelty`/`structure`, boundaries are derived
+
+  from audio and mapped to frames.
+
+- For each block, the same audio chunk (matching that block's time range
+
+  after `audio_length_mode`) drives sound->image for all frames in the block.
+
+- Image->sound uses the block mean image to synthesize audio for that block;
+
+  in `serial-image-first`, the mean is taken after sound->image processing.
+
+  Output audio is the concatenation of per-block chunks.
+
+---
 
 ## 7. CLI and library boundary
 

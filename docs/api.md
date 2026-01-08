@@ -465,7 +465,8 @@ Key notes:
 - `--audio` is optional; if omitted, audio is extracted from the input video (ffmpeg required). If `--audio` points to a video file, its audio track is auto-extracted.
 - `--serial-mode`: `parallel`, `serial-image-first`, `serial-sound-first`.
 - `--audio-length-mode`: `trim`, `pad-zero`, `pad-loop`, `pad-noise`, `center-zero`.
-- `--block-size`: process frames in blocks (e.g., 12/24/50/120/240) that share one audio chunk; audio is derived from the mean image of each block.
+- `--block-strategy`: `fixed` uses frame counts; `beats`/`novelty`/`structure` analyze audio to set block boundaries.
+- `--block-size`: process frames in blocks (e.g., 12/24/50/120/240). The block time range defines the audio chunk reused for sound->image; image->sound uses the block mean image (or mean of processed frames in `serial-image-first`) with that chunk.
 - Sound->image options mirror `spectral_sculpt` (`--s2i-mode` mono/stereo/mid-side, `--s2i-colorspace` luma/color).
 - Image->sound options mirror the image2sound demo (`--i2s-mode` flat/hist/radial with colorspace/phase/padding/length controls).
 
