@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -11,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
+from exconv.video_meta import ffprobe_available, ffprobe_fps_info
 
 VIDEO_EXTS = {
     ".mp4",
@@ -26,7 +26,6 @@ VIDEO_EXTS = {
     ".ogv",
 }
 
-_FFPROBE_AVAILABLE: bool | None = None
 _FPS_GUARD_RATIO = 1.2
 
 
@@ -57,102 +56,6 @@ def _set_thread_env(n: int) -> None:
         os.environ[key] = val
 
 
-def _ffprobe_available() -> bool:
-    global _FFPROBE_AVAILABLE
-    if _FFPROBE_AVAILABLE is not None:
-        return _FFPROBE_AVAILABLE
-    try:
-        subprocess.run(
-            ["ffprobe", "-version"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        _FFPROBE_AVAILABLE = True
-    except (OSError, FileNotFoundError):
-        _FFPROBE_AVAILABLE = False
-    return _FFPROBE_AVAILABLE
-
-
-def _parse_fraction(val: object) -> Optional[float]:
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    text = str(val).strip()
-    if not text:
-        return None
-    if "/" in text:
-        num, den = text.split("/", 1)
-        try:
-            num_f = float(num)
-            den_f = float(den)
-        except ValueError:
-            return None
-        if den_f == 0:
-            return None
-        return num_f / den_f
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _parse_float(val: object) -> Optional[float]:
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    text = str(val).strip()
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _ffprobe_fps_info(
-    video_path: Path,
-) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    if not _ffprobe_available():
-        return None, None, None
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=avg_frame_rate,r_frame_rate,duration:format=duration",
-        "-of",
-        "json",
-        str(video_path),
-    ]
-    try:
-        res = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except (OSError, FileNotFoundError):
-        return None, None, None
-    if res.returncode != 0 or not res.stdout:
-        return None, None, None
-    try:
-        data = json.loads(res.stdout.decode("utf-8", errors="ignore"))
-    except json.JSONDecodeError:
-        return None, None, None
-
-    streams = data.get("streams") or []
-    if not streams:
-        return None, None, None
-    stream = streams[0] or {}
-
-    avg = _parse_fraction(stream.get("avg_frame_rate"))
-    r = _parse_fraction(stream.get("r_frame_rate"))
-    duration = _parse_float(stream.get("duration"))
-    if duration is None:
-        duration = _parse_float((data.get("format") or {}).get("duration"))
-    return avg, r, duration
-
-
 @dataclass(frozen=True)
 class FpsDecision:
     fps_override: Optional[float]
@@ -169,7 +72,7 @@ def _resolve_fps_override(
     if default_fps is not None or guard_mode == "off":
         return FpsDecision(fps_override=default_fps, fps_policy=None)
 
-    avg, r, _duration = _ffprobe_fps_info(video_path)
+    avg, r, _duration = ffprobe_fps_info(video_path)
     if avg is None or r is None or avg <= 0 or r <= 0:
         return FpsDecision(fps_override=None, fps_policy=None)
 
@@ -248,6 +151,13 @@ class JobSpec:
     block_min_frames: int
     block_max_frames: Optional[int]
     block_beats_per: int
+    block_crossover: str
+    block_crossover_frames: int
+    block_adsr_attack_s: float
+    block_adsr_decay_s: float
+    block_adsr_sustain: float
+    block_adsr_release_s: float
+    block_adsr_curve: str
     s2i_mode: str
     s2i_colorspace: str
     s2i_safe_color: bool
@@ -314,6 +224,13 @@ def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
             block_min_frames=spec.block_min_frames,
             block_max_frames=spec.block_max_frames,
             block_beats_per=spec.block_beats_per,
+            block_crossover=spec.block_crossover,
+            block_crossover_frames=spec.block_crossover_frames,
+            block_adsr_attack_s=spec.block_adsr_attack_s,
+            block_adsr_decay_s=spec.block_adsr_decay_s,
+            block_adsr_sustain=spec.block_adsr_sustain,
+            block_adsr_release_s=spec.block_adsr_release_s,
+            block_adsr_curve=spec.block_adsr_curve,
             s2i_mode=spec.s2i_mode,
             s2i_colorspace=spec.s2i_colorspace,
             i2s_mode=spec.i2s_mode,
@@ -476,6 +393,48 @@ def _add_video_folderbatch_args(parser: argparse.ArgumentParser) -> None:
         help="Group this many beats into a block for --block-strategy beats.",
     )
     parser.add_argument(
+        "--crossover",
+        choices=["none", "equal", "power", "lin"],
+        default="none",
+        help="Crossfade mode across block boundaries.",
+    )
+    parser.add_argument(
+        "--crossover-frames",
+        type=int,
+        default=1,
+        help="Frames per block side used for crossover blending.",
+    )
+    parser.add_argument(
+        "--block-adsr-attack-s",
+        type=float,
+        default=0.0,
+        help="ADSR attack (seconds) applied to each block's output audio.",
+    )
+    parser.add_argument(
+        "--block-adsr-decay-s",
+        type=float,
+        default=0.0,
+        help="ADSR decay (seconds) applied to each block's output audio.",
+    )
+    parser.add_argument(
+        "--block-adsr-sustain",
+        type=float,
+        default=1.0,
+        help="ADSR sustain level [0..1] applied to each block's output audio.",
+    )
+    parser.add_argument(
+        "--block-adsr-release-s",
+        type=float,
+        default=0.0,
+        help="ADSR release (seconds) applied to each block's output audio.",
+    )
+    parser.add_argument(
+        "--block-adsr-curve",
+        choices=["linear", "equal-energy", "equal-power"],
+        default="linear",
+        help="Curve shaping for ADSR attack/decay/release segments.",
+    )
+    parser.add_argument(
         "--s2i-mode",
         choices=["mono", "stereo", "mid-side"],
         default="mid-side",
@@ -553,6 +512,16 @@ def _cmd_video_folderbatch(args: argparse.Namespace) -> int:
         raise SystemExit("--block-max-frames must be positive")
     if args.beats_per_block <= 0:
         raise SystemExit("--beats-per-block must be positive")
+    if args.crossover_frames < 0:
+        raise SystemExit("--crossover-frames must be >= 0")
+    if args.block_adsr_attack_s < 0:
+        raise SystemExit("--block-adsr-attack-s must be >= 0")
+    if args.block_adsr_decay_s < 0:
+        raise SystemExit("--block-adsr-decay-s must be >= 0")
+    if args.block_adsr_release_s < 0:
+        raise SystemExit("--block-adsr-release-s must be >= 0")
+    if not (0.0 <= args.block_adsr_sustain <= 1.0):
+        raise SystemExit("--block-adsr-sustain must be in [0, 1]")
 
     if args.blas_threads is not None:
         if args.blas_threads <= 0:
@@ -582,7 +551,7 @@ def _cmd_video_folderbatch(args: argparse.Namespace) -> int:
     guard_mode = args.fps_guard
     if guard_mode == "ask" and not sys.stdin.isatty():
         guard_mode = "auto"
-    if guard_mode != "off" and not _ffprobe_available():
+    if guard_mode != "off" and not ffprobe_available():
         print("[fps-guard] ffprobe not found; skipping FPS mismatch checks.")
         guard_mode = "off"
     default_fps_policy = "metadata" if guard_mode == "off" else "auto"
@@ -649,6 +618,13 @@ def _cmd_video_folderbatch(args: argparse.Namespace) -> int:
                     else None
                 ),
                 block_beats_per=int(args.beats_per_block),
+                block_crossover=str(args.crossover),
+                block_crossover_frames=int(args.crossover_frames),
+                block_adsr_attack_s=float(args.block_adsr_attack_s),
+                block_adsr_decay_s=float(args.block_adsr_decay_s),
+                block_adsr_sustain=float(args.block_adsr_sustain),
+                block_adsr_release_s=float(args.block_adsr_release_s),
+                block_adsr_curve=str(args.block_adsr_curve),
                 s2i_mode=args.s2i_mode,
                 s2i_colorspace=args.s2i_colorspace,
                 s2i_safe_color=bool(args.s2i_safe_color),

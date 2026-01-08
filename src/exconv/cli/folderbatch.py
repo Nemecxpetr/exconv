@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 from itertools import combinations
 from pathlib import Path
-from typing import List, Tuple
+import subprocess
+from typing import Dict, List, Tuple
 
 import numpy as np
+import imageio.v3 as iio
 
-from exconv.io import read_audio, write_audio, read_image, write_image, as_uint8
+from exconv.io import read_audio, write_audio, read_image, write_image, as_uint8, write_video_frames
 from exconv.conv1d import (
     Audio,
     auto_convolve as audio_auto_convolve,
@@ -32,6 +34,44 @@ def _find_files(root: Path, exts: Tuple[str, ...]) -> List[Path]:
 
 def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
+
+
+def _ffmpeg_available() -> bool:
+    try:
+        subprocess.run(
+            ["ffmpeg", "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, FileNotFoundError):
+        return False
+    return True
+
+
+def _mux_audio(video_src: Path, audio_src: Path, out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_src),
+        "-i",
+        str(audio_src),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "256k",
+        "-shortest",
+        str(out_path),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def process_audio_batch(
@@ -112,6 +152,11 @@ def process_sound2image_batch(
     mode: str = "mono",
     colorspace: str = "luma",
     normalize: bool = True,
+    animate: bool = False,
+    animate_format: str = "gif",
+    animate_fps: float = 10.0,
+    animate_loop: int = 0,
+    animate_audio: bool = False,
 ) -> None:
     """
     For every image in image_dir and every audio in audio_dir, run spectral_sculpt.
@@ -138,6 +183,12 @@ def process_sound2image_batch(
         audio_data.append((p, a, sr))
         print(f"  loaded audio {p.name} (sr={sr}, shape={a.shape})")
 
+    anim_paths: Dict[Path, List[Path]] = {}
+    anim_dir = out_dir / "animations"
+    if animate:
+        _ensure_dir(anim_dir)
+        anim_paths = {p: [] for p, _, _ in audio_data}
+
     for img_path in image_files:
         img = read_image(img_path, mode="RGB", dtype="uint8")
         print(f"  loaded image {img_path.name} (shape={img.shape})")
@@ -161,6 +212,46 @@ def process_sound2image_batch(
             out_path = out_dir / out_name
             write_image(out_path, out_u8)
             print(f"    sound2image {img_path.name} - {a_path.name} -> {out_path}")
+            if animate:
+                anim_paths[a_path].append(out_path)
+
+    if not animate:
+        return
+
+    write_gif = animate_format in {"gif", "both"}
+    write_mp4 = animate_format in {"mp4", "both"}
+    if write_mp4 and animate_audio and not _ffmpeg_available():
+        raise RuntimeError("ffmpeg is required for --s2i-animate-audio.")
+
+    duration = 1.0 / float(animate_fps)
+    for a_path, frame_paths in anim_paths.items():
+        if not frame_paths:
+            continue
+        frames = [iio.imread(str(p)) for p in frame_paths]
+        stem = a_path.stem
+        if write_gif:
+            out_gif = anim_dir / f"{stem}__S2I.gif"
+            iio.imwrite(
+                str(out_gif),
+                frames,
+                format="GIF",
+                loop=int(animate_loop),
+                duration=duration,
+            )
+            print(f"    gif {a_path.name} -> {out_gif}")
+        if write_mp4:
+            out_mp4 = anim_dir / f"{stem}__S2I.mp4"
+            if animate_audio:
+                tmp_mp4 = anim_dir / f"{stem}__S2I__video.mp4"
+                write_video_frames(tmp_mp4, frames, fps=float(animate_fps))
+                _mux_audio(tmp_mp4, a_path, out_mp4)
+                try:
+                    tmp_mp4.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                write_video_frames(out_mp4, frames, fps=float(animate_fps))
+            print(f"    video {a_path.name} -> {out_mp4}")
 
 
 def _add_folderbatch_args(parser: argparse.ArgumentParser) -> None:
@@ -226,7 +317,42 @@ def _add_folderbatch_args(parser: argparse.ArgumentParser) -> None:
         action="store_false",
         help="Disable sound2image output normalization to [0,1].",
     )
-    parser.set_defaults(s2i_normalize=True)
+    g_s2i.add_argument(
+        "--s2i-animate",
+        action="store_true",
+        help="Write per-audio animations from the sound2image outputs.",
+    )
+    g_s2i.add_argument(
+        "--s2i-animate-format",
+        choices=["gif", "mp4", "both"],
+        default="mp4",
+        help="Animation format when --s2i-animate is set.",
+    )
+    g_s2i.add_argument(
+        "--s2i-animate-fps",
+        type=float,
+        default=10.0,
+        help="Frames per second for sound2image animations.",
+    )
+    g_s2i.add_argument(
+        "--s2i-animate-loop",
+        type=int,
+        default=0,
+        help="GIF loop count (0 = infinite).",
+    )
+    g_s2i.add_argument(
+        "--s2i-animate-audio",
+        dest="s2i_animate_audio",
+        action="store_true",
+        help="Mux source audio into mp4 animations (requires ffmpeg).",
+    )
+    g_s2i.add_argument(
+        "--s2i-animate-no-audio",
+        dest="s2i_animate_audio",
+        action="store_false",
+        help="Disable audio mux for mp4 animations.",
+    )
+    parser.set_defaults(s2i_normalize=True, s2i_animate_audio=None)
 
 
 def _cmd_folderbatch(args: argparse.Namespace) -> int:
@@ -263,6 +389,21 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
         print(f"[audio] Audio directory {audio_dir} does not exist - skipping.")
 
     if img_dir.exists() and audio_dir.exists():
+        if args.s2i_animate:
+            if args.s2i_animate_fps <= 0:
+                raise SystemExit("--s2i-animate-fps must be > 0")
+            if args.s2i_animate_loop < 0:
+                raise SystemExit("--s2i-animate-loop must be >= 0")
+            animate_audio = args.s2i_animate_audio
+            if animate_audio is None:
+                animate_audio = args.s2i_animate_format in {"mp4", "both"}
+            if animate_audio and args.s2i_animate_format == "gif":
+                print("[warn] --s2i-animate-audio has no effect when format is gif.")
+            if animate_audio and args.s2i_animate_format in {"mp4", "both"} and not _ffmpeg_available():
+                raise SystemExit("ffmpeg is required for --s2i-animate-audio.")
+        else:
+            animate_audio = False
+
         process_sound2image_batch(
             audio_dir,
             img_dir,
@@ -270,6 +411,11 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
             mode=args.s2i_mode,
             colorspace=args.s2i_colorspace,
             normalize=args.s2i_normalize,
+            animate=args.s2i_animate,
+            animate_format=args.s2i_animate_format,
+            animate_fps=args.s2i_animate_fps,
+            animate_loop=args.s2i_animate_loop,
+            animate_audio=animate_audio,
         )
     else:
         if not img_dir.exists():

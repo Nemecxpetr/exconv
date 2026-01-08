@@ -52,6 +52,13 @@ def run_video_biconv(
     block_min_frames: int,
     block_max_frames: int | None,
     block_beats_per: int,
+    block_crossover: str,
+    block_crossover_frames: int,
+    block_adsr_attack_s: float,
+    block_adsr_decay_s: float,
+    block_adsr_sustain: float,
+    block_adsr_release_s: float,
+    block_adsr_curve: str,
     s2i_mode: str,
     s2i_colorspace: str,
     i2s_mode: str,
@@ -101,6 +108,13 @@ def run_video_biconv(
         block_min_frames=block_min_frames,
         block_max_frames=block_max_frames,
         block_beats_per=block_beats_per,
+        block_crossover=block_crossover,  # type: ignore[arg-type]
+        block_crossover_frames=block_crossover_frames,
+        block_adsr_attack_s=block_adsr_attack_s,
+        block_adsr_decay_s=block_adsr_decay_s,
+        block_adsr_sustain=block_adsr_sustain,
+        block_adsr_release_s=block_adsr_release_s,
+        block_adsr_curve=block_adsr_curve,  # type: ignore[arg-type]
         out_video=out_video,
         out_audio=out_audio,
         mux_output=mux,
@@ -233,6 +247,48 @@ def register_video_biconv_subcommand(subparsers: argparse._SubParsersAction) -> 
         default=1,
         help="Group this many beats into a single block for --block-strategy beats.",
     )
+    p.add_argument(
+        "--crossover",
+        choices=["none", "equal", "power", "lin"],
+        default="none",
+        help="Crossfade mode across block boundaries.",
+    )
+    p.add_argument(
+        "--crossover-frames",
+        type=int,
+        default=1,
+        help="Frames per block side used for crossover blending.",
+    )
+    p.add_argument(
+        "--block-adsr-attack-s",
+        type=float,
+        default=0.0,
+        help="ADSR attack (seconds) applied to each block's output audio.",
+    )
+    p.add_argument(
+        "--block-adsr-decay-s",
+        type=float,
+        default=0.0,
+        help="ADSR decay (seconds) applied to each block's output audio.",
+    )
+    p.add_argument(
+        "--block-adsr-sustain",
+        type=float,
+        default=1.0,
+        help="ADSR sustain level [0..1] applied to each block's output audio.",
+    )
+    p.add_argument(
+        "--block-adsr-release-s",
+        type=float,
+        default=0.0,
+        help="ADSR release (seconds) applied to each block's output audio.",
+    )
+    p.add_argument(
+        "--block-adsr-curve",
+        choices=["linear", "equal-energy", "equal-power"],
+        default="linear",
+        help="Curve shaping for ADSR attack/decay/release segments.",
+    )
     # sound->image
     p.add_argument(
         "--s2i-mode",
@@ -341,6 +397,16 @@ def _cmd_video_biconv(args: argparse.Namespace) -> int:
     audio_path = _path(args.audio_path) if args.audio_path else None
     out_video = _path(args.out_video)
     out_audio = _path(args.out_audio) if args.out_audio else None
+    if args.block_adsr_attack_s < 0:
+        raise SystemExit("--block-adsr-attack-s must be >= 0")
+    if args.block_adsr_decay_s < 0:
+        raise SystemExit("--block-adsr-decay-s must be >= 0")
+    if args.block_adsr_release_s < 0:
+        raise SystemExit("--block-adsr-release-s must be >= 0")
+    if not (0.0 <= args.block_adsr_sustain <= 1.0):
+        raise SystemExit("--block-adsr-sustain must be in [0, 1]")
+    if args.crossover_frames < 0:
+        raise SystemExit("--crossover-frames must be >= 0")
 
     return run_video_biconv(
         video_path=video_path,
@@ -358,6 +424,13 @@ def _cmd_video_biconv(args: argparse.Namespace) -> int:
         block_min_frames=args.block_min_frames,
         block_max_frames=args.block_max_frames,
         block_beats_per=args.beats_per_block,
+        block_crossover=args.crossover,
+        block_crossover_frames=args.crossover_frames,
+        block_adsr_attack_s=args.block_adsr_attack_s,
+        block_adsr_decay_s=args.block_adsr_decay_s,
+        block_adsr_sustain=args.block_adsr_sustain,
+        block_adsr_release_s=args.block_adsr_release_s,
+        block_adsr_curve=args.block_adsr_curve,
         s2i_mode=args.s2i_mode,
         s2i_colorspace=args.s2i_colorspace,
         i2s_mode=args.i2s_mode,
