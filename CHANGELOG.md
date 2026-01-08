@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.2.0
 - Added block-based video bi-conv (`--block-size`) so groups of frames share an audio chunk and the audio is driven by the mean image of each block.
 - Added `video-biconv` subcommand to the main `exconv` CLI and auto-detection of video inputs when an audio path is a video.
 - Added radial image->sound impulse derivation with multiple phase modes (zero/random/image/min-phase/spiral) and stereo/mid-side colorspaces.
