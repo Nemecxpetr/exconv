@@ -72,7 +72,7 @@ Given `x` and `h` on some axes:
 - `full`  the mathematically full linear convolution
 
   $$
-  \text{length(full)} = \operatorname{len}(x) + \operatorname{len}(h) - 1
+  \text{length(full)} = \mathrm{len}(x) + \mathrm{len}(h) - 1
   $$
 
   ASCII: length(full) = len(x) + len(h) - 1
@@ -403,11 +403,11 @@ These determine whether the impulse is mono or stereo:
 #### Impulse modes (i2s-mode)
 
 - `flat`  flatten grayscale values into a 1D impulse  
-  $h = \operatorname{ravel}(g)$ (optionally decimated for length control).  
-  Optional DC removal: $h = h - \operatorname{mean}(h)$.
+  $h = \mathrm{ravel}(g)$ (optionally decimated for length control).  
+  Optional DC removal: $h = h - \mathrm{mean}(h)$.
 
 - `hist`  histogram of grayscale values  
-  $h[b] = \#\{ g \in \text{bin } b \}$ for $b = 0..n\_bins-1$.  
+  $h[b] = |\{ g \in \text{bin } b \}|$ for $b = 0..n\_bins-1$.  
   Impulse length is `n_bins`.
 
 - `radial`  FFT magnitude radial profile  
