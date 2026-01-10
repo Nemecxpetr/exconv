@@ -25,11 +25,19 @@ Notes:
 - `ffmpeg` is required for video audio extraction/muxing (used by `imageio[ffmpeg]` and the `video-biconv` command).
 - `tqdm` provides progress bars for per-frame processing.
 
-After installation, you should have:
+After installation, you should have the main CLI entry point:
 
 ```bash
 exconv --version
-exconv-image --help
+exconv --help
+```
+
+`exconv-image` is an optional legacy demo helper (see below). All other
+commands are subcommands of `exconv`, e.g.:
+
+```bash
+exconv audio-auto --help
+exconv video-biconv --help
 ```
 
 ---
@@ -154,8 +162,9 @@ Use the included samples for a quick spin:
 - Batch video: `exconv video-folderbatch my_project --jobs 2 --suffix _biconv --serial-mode parallel`
 - Animate frames: `exconv animate samples/output/sound2image/my_project/animations out.mp4 --fps 12`
 
-The package exposes a small demo CLI in `exconv.cli.exconv_cli`, registered
-as the `exconv` command.
+The package exposes the main CLI in `exconv.cli.exconv_cli`, registered
+as the `exconv` command. Video-related commands are subcommands here (there
+is no separate `exconv-video` entry point).
 
 ### 1. Audio auto-convolution
 
@@ -224,7 +233,7 @@ The command internally calls the `spectral_sculpt` function in
 
 ---
 
-### 4. Image demo helper (`exconv-image`)
+### 4. Image demo helper (`exconv-image`, legacy)
 
 The `exconv-image` entry point runs a simpler demo for auto/pair convolution
 on a single image and saves JPEG outputs:
