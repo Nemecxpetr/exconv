@@ -16,6 +16,15 @@ from exconv.video_meta import (
     ffprobe_available,
     ffprobe_fps_info,
 )
+from exconv.cli.settings import (
+    add_settings_args,
+    strip_settings_args,
+    load_settings,
+    select_settings,
+    apply_settings_to_parser,
+    serialize_args,
+    save_settings,
+)
 
 VIDEO_EXTS = {
     ".mp4",
@@ -333,6 +342,7 @@ def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
 
 
 def _add_video_folderbatch_args(parser: argparse.ArgumentParser) -> None:
+    add_settings_args(parser)
     parser.add_argument("project", help="Project name under samples/input/video/<project>.")
     parser.add_argument(
         "--root",
@@ -777,7 +787,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    cleaned_argv, settings_path, save_path = strip_settings_args(raw_argv)
+    if settings_path:
+        settings_data = load_settings(Path(settings_path))
+        settings = select_settings(settings_data, "video-folderbatch")
+        apply_settings_to_parser(parser, settings)
+    args = parser.parse_args(cleaned_argv)
+    if save_path:
+        exclude = {"settings_path", "save_settings_path", "func"}
+        settings_out = serialize_args(args, parser, exclude=exclude)
+        save_settings(Path(save_path), settings_out, command="video-folderbatch")
     return _cmd_video_folderbatch(args)
 
 

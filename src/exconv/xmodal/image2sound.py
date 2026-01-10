@@ -270,14 +270,17 @@ def _phase_profile_from_bins(
 ) -> np.ndarray:
     """Circular-mean phase per radial bin."""
     flat_bins = bin_idx.ravel()
-    phases = phase_map.ravel()
-    out = np.zeros(n_bins, dtype=np.float32)
-    for b in range(n_bins):
-        mask = flat_bins == b
-        if not np.any(mask):
-            out[b] = 0.0
-            continue
-        out[b] = float(np.angle(np.exp(1j * phases[mask]).mean()))
+    if flat_bins.size == 0:
+        return np.zeros(n_bins, dtype=np.float32)
+    phases = np.asarray(phase_map, dtype=np.float32).ravel()
+    # Vectorized circular mean via weighted bincount (avoids per-bin masks).
+    cos_vals = np.cos(phases)
+    sum_cos = np.bincount(flat_bins, weights=cos_vals, minlength=n_bins)
+    del cos_vals
+    sin_vals = np.sin(phases)
+    sum_sin = np.bincount(flat_bins, weights=sin_vals, minlength=n_bins)
+    del sin_vals
+    out = np.arctan2(sum_sin, sum_cos).astype(np.float32, copy=False)
     return out
 
 
@@ -345,20 +348,25 @@ def _image_to_impulse_radial(
 
     half_len = impulse_len // 2 + 1
     channels = _extract_channels(img, colorspace)
+    if not channels:
+        return np.zeros(1, dtype=np.float32)
     rng = np.random.default_rng()
     impulses: list[np.ndarray] = []
 
+    bin_idx = _radial_bins(channels[0].shape, n_bins=half_len, mode=radius_mode)
+
     for ch in channels:
-        channel = ch.astype(np.float32)
+        channel = np.asarray(ch, dtype=np.float32)
         if remove_dc:
-            channel = channel - np.mean(channel)
+            channel -= np.mean(channel)
 
         spec = _fft.fft2(channel)
         shifted = _fft.fftshift(spec)
-        mag = np.abs(shifted)
+        del spec
+        mag = np.abs(shifted).astype(np.float32, copy=False)
 
-        bin_idx = _radial_bins(channel.shape, n_bins=half_len, mode=radius_mode)
         profile = _radial_profile_from_bins(mag, bin_idx=bin_idx, n_bins=half_len)
+        del mag
 
         if smoothing == "hann":
             profile = profile * hann(profile.size).astype(np.float32)
@@ -368,19 +376,22 @@ def _image_to_impulse_radial(
             raise ValueError(f"Unknown smoothing: {smoothing}")
 
         if phase_mode == "min-phase":
+            del shifted
             H_half = _minimum_phase_spectrum(profile, n_fft=impulse_len)
         else:
+            phase_map = None
+            if phase_mode in {"image", "spiral"}:
+                phase_map = np.angle(shifted).astype(np.float32, copy=False)
+            del shifted
             if phase_mode == "zero":
                 phase = np.zeros_like(profile, dtype=np.float32)
             elif phase_mode == "random":
                 phase = rng.uniform(-np.pi, np.pi, size=profile.size).astype(np.float32)
             elif phase_mode == "image":
-                phase_map = np.angle(shifted)
                 phase = _phase_profile_from_bins(
                     phase_map, bin_idx=bin_idx, n_bins=half_len
                 )
             elif phase_mode == "spiral":
-                phase_map = np.angle(shifted)
                 phase = _spiral_phase_profile(phase_map, n_bins=half_len)
             else:
                 raise ValueError(f"Unknown phase_mode: {phase_mode}")

@@ -9,6 +9,12 @@ and `docs/design.md` (video block and cross-modal sections).
 
 ## Batch helpers (CLI)
 
+### Settings files (shared)
+- Use `--settings <path>` to load option defaults from a JSON or CSV file.
+- Use `--save-settings <path>` to write the current option values (non-positional) for the command.
+- JSON can store multiple commands by name (e.g., `video-folderbatch`, `video-biconv`); CSV is flat `key,value`.
+- CLI flags always override values loaded from settings.
+
 ### `exconv video-folderbatch` - project-wide video bi-conv
 - Purpose: run `exconv video-biconv` over every video in a project folder.
 - Inputs: `samples/input/video/<project>/*` (or `--root <root>`), optional

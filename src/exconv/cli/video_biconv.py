@@ -8,6 +8,7 @@ from exconv.xmodal import (
     DualSerialMode,
     AudioLengthMode,
 )
+from exconv.cli.settings import add_settings_args
 
 
 def _path(p: str | Path) -> Path:
@@ -137,6 +138,7 @@ def register_video_biconv_subcommand(subparsers: argparse._SubParsersAction) -> 
         "video-biconv",
         help="Bi-directional video convolution: sound <-> image per frame.",
     )
+    add_settings_args(p)
     p.add_argument(
         "--video",
         dest="video_path",

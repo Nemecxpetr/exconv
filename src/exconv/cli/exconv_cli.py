@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional, Dict, Iterable
 
@@ -12,6 +13,17 @@ from exconv import __version__  # version helper :contentReference[oaicite:0]{in
 from exconv.cli.folderbatch import register_folderbatch_subcommand
 from exconv.cli.video_biconv import register_video_biconv_subcommand
 from exconv.cli.video_folderbatch import register_video_folderbatch_subcommand
+from exconv.cli.settings import (
+    add_settings_args,
+    strip_settings_args,
+    detect_command,
+    load_settings,
+    select_settings,
+    apply_settings_to_parser,
+    serialize_args,
+    save_settings,
+    find_subparser,
+)
 from exconv.io import (
     read_audio,
     write_audio,
@@ -286,6 +298,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="exconv",
         description="Minimal CLI for exconv demos (audio, image, and sound→image).",
     )
+    add_settings_args(parser)
     parser.add_argument(
         "-V",
         "--version",
@@ -300,6 +313,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "audio-auto",
         help="Self-convolve an audio file (auto-convolution).",
     )
+    add_settings_args(p_audio)
     p_audio.add_argument(
         "--in",
         dest="in_path",
@@ -347,6 +361,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "img-auto",
         help="Image auto-convolution or Gaussian pair-convolution.",
     )
+    add_settings_args(p_img)
     p_img.add_argument(
         "--in",
         dest="in_path",
@@ -398,6 +413,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "sound2image",
         help="Spectrally sculpt an image using an audio file.",
     )
+    add_settings_args(p_s2i)
     p_s2i.add_argument(
         "--img",
         required=True,
@@ -438,6 +454,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "animate",
         help="Create a GIF/MP4 from a directory of images.",
     )
+    add_settings_args(p_anim)
     p_anim.add_argument(
         "input_dir",
         help="Directory containing input images.",
@@ -501,7 +518,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    cleaned_argv, settings_path, save_path = strip_settings_args(raw_argv)
+    command = detect_command(cleaned_argv)
+
+    if settings_path:
+        settings_data = load_settings(Path(settings_path))
+        settings = select_settings(settings_data, command)
+        target = find_subparser(parser, command) or parser
+        apply_settings_to_parser(target, settings)
+
+    args = parser.parse_args(cleaned_argv)
+
+    if save_path:
+        cmd = getattr(args, "command", command)
+        target = find_subparser(parser, cmd) or parser
+        exclude = {"settings_path", "save_settings_path", "command", "func"}
+        settings_out = serialize_args(args, target, exclude=exclude)
+        save_settings(Path(save_path), settings_out, command=cmd)
+
     return args.func(args)
 
 

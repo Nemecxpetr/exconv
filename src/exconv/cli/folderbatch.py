@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from itertools import combinations
 from pathlib import Path
 import subprocess
@@ -16,6 +17,15 @@ from exconv.conv1d import (
     pair_convolve as audio_pair_convolve,
 )
 from exconv.xmodal.sound2image import spectral_sculpt
+from exconv.cli.settings import (
+    add_settings_args,
+    strip_settings_args,
+    load_settings,
+    select_settings,
+    apply_settings_to_parser,
+    serialize_args,
+    save_settings,
+)
 
 
 AUDIO_EXTS = (".wav", ".flac", ".aiff", ".aif", ".ogg", ".mp3")
@@ -255,6 +265,7 @@ def process_sound2image_batch(
 
 
 def _add_folderbatch_args(parser: argparse.ArgumentParser) -> None:
+    add_settings_args(parser)
     parser.add_argument(
         "project",
         help=(
@@ -452,7 +463,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    cleaned_argv, settings_path, save_path = strip_settings_args(raw_argv)
+    if settings_path:
+        settings_data = load_settings(Path(settings_path))
+        settings = select_settings(settings_data, "folderbatch")
+        apply_settings_to_parser(parser, settings)
+    args = parser.parse_args(cleaned_argv)
+    if save_path:
+        exclude = {"settings_path", "save_settings_path", "func"}
+        settings_out = serialize_args(args, parser, exclude=exclude)
+        save_settings(Path(save_path), settings_out, command="folderbatch")
     return _cmd_folderbatch(args)
 
 

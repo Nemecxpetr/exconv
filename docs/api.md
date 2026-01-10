@@ -967,6 +967,12 @@ The CLI entry point is `exconv.cli.exconv_cli:main`, registered as `exconv`
 
 in `pyproject.toml`.
 
+Settings files (shared):
+- `--settings <path>` loads defaults for the command from JSON or CSV.
+- `--save-settings <path>` writes current option values (non-positional) for the command.
+- JSON can store per-command blocks keyed by command name; CSV is flat `key,value`.
+- CLI flags override loaded settings.
+
 
 
 ### 7.1 Top-level
