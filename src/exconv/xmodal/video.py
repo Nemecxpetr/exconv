@@ -21,7 +21,12 @@ from exconv.dsp.segments import (
     match_audio_length,
     audio_chunk_for_interval,
 )
-from exconv.video_meta import ffprobe_fps_info, parse_float
+from exconv.video_meta import (
+    build_exconv_metadata,
+    ffmpeg_metadata_args,
+    ffprobe_fps_info,
+    parse_float,
+)
 from exconv.io import read_audio, write_audio, read_video_frames, write_video_frames
 from exconv.conv1d.audio import Audio, auto_convolve as audio_auto_convolve
 from .sound2image import spectral_sculpt, Mode, ColorMode
@@ -248,6 +253,14 @@ def _read_video_meta(path: Path) -> dict:
         return dict(meta) if isinstance(meta, dict) else {}
     except Exception:
         return {}
+
+
+def _build_biconv_metadata(
+    settings: dict[str, object],
+    *,
+    variant: str,
+) -> dict[str, str]:
+    return build_exconv_metadata("video-biconv", variant, settings)
 
 
 def _block_overlap_sizes(
@@ -1081,6 +1094,9 @@ def biconv_video_from_files(
     """
     video_path = _as_path(video_path)
     audio_used: Path | None = _as_path(audio_path) if audio_path else None
+    audio_source = "video"
+    if audio_used is not None and not _looks_like_video(audio_used):
+        audio_source = "audio"
 
     if audio_used is None:
         audio, sr = _extract_audio_from_video(video_path)
@@ -1179,6 +1195,52 @@ def biconv_video_from_files(
     if mux_output and out_video is not None and temp_video is not None and temp_audio is not None:
         if not _ffmpeg_available():
             raise RuntimeError("mux_output requested but ffmpeg not available on PATH")
+        metadata_settings = {
+            "fps": fps,
+            "fps_policy": fps_policy,
+            "fps_used": fps_used,
+            "sr": sr,
+            "serial_mode": serial_mode,
+            "audio_length_mode": audio_length_mode,
+            "block_size": block_size,
+            "block_size_div": block_size_div,
+            "block_strategy": block_strategy,
+            "block_min_frames": block_min_frames,
+            "block_max_frames": block_max_frames,
+            "block_beats_per": block_beats_per,
+            "block_hop_length": block_hop_length,
+            "block_n_fft": block_n_fft,
+            "block_peak_threshold": block_peak_threshold,
+            "block_peak_distance_s": block_peak_distance_s,
+            "block_structure_kernel": block_structure_kernel,
+            "block_structure_max_frames": block_structure_max_frames,
+            "block_bpm_min": block_bpm_min,
+            "block_bpm_max": block_bpm_max,
+            "block_crossover": block_crossover,
+            "block_crossover_frames": block_crossover_frames,
+            "block_adsr_attack_s": block_adsr_attack_s,
+            "block_adsr_decay_s": block_adsr_decay_s,
+            "block_adsr_sustain": block_adsr_sustain,
+            "block_adsr_release_s": block_adsr_release_s,
+            "block_adsr_curve": block_adsr_curve,
+            "s2i_mode": s2i_mode,
+            "s2i_colorspace": s2i_colorspace,
+            "s2i_safe_color": s2i_safe_color,
+            "s2i_chroma_strength": s2i_chroma_strength,
+            "s2i_chroma_clip": s2i_chroma_clip,
+            "i2s_mode": i2s_mode,
+            "i2s_colorspace": i2s_colorspace,
+            "i2s_pad_mode": i2s_pad_mode,
+            "i2s_impulse_len": i2s_impulse_len,
+            "i2s_radius_mode": i2s_radius_mode,
+            "i2s_phase_mode": i2s_phase_mode,
+            "i2s_smoothing": i2s_smoothing,
+            "i2s_impulse_norm": i2s_impulse_norm,
+            "i2s_out_norm": i2s_out_norm,
+            "i2s_n_bins": i2s_n_bins,
+            "audio_source": audio_source,
+        }
+        metadata_tags = _build_biconv_metadata(metadata_settings, variant="biconv")
         cmd = [
             "ffmpeg",
             "-y",
@@ -1198,8 +1260,9 @@ def biconv_video_from_files(
             "256k",
             "-movflags",
             "+faststart",
-            str(out_video),
         ]
+        cmd += ffmpeg_metadata_args(metadata_tags)
+        cmd.append(str(out_video))
         subprocess.run(cmd, check=True)
         try:
             temp_video.unlink(missing_ok=True)
@@ -1285,6 +1348,9 @@ def biconv_video_to_files_stream(
 
     video_path = _as_path(video_path)
     audio_used: Path | None = _as_path(audio_path) if audio_path else None
+    audio_source = "video"
+    if audio_used is not None and not _looks_like_video(audio_used):
+        audio_source = "audio"
 
     # --- audio ---
     if audio_used is None:
@@ -1807,6 +1873,52 @@ def biconv_video_to_files_stream(
     if mux_output and out_video_p is not None and temp_video is not None and temp_audio is not None:
         if not _ffmpeg_available():
             raise RuntimeError("mux_output requested but ffmpeg not available on PATH")
+        metadata_settings = {
+            "fps": fps,
+            "fps_policy": fps_policy,
+            "fps_used": fps_used,
+            "sr": sr,
+            "serial_mode": serial_mode,
+            "audio_length_mode": audio_length_mode,
+            "block_size": block_size,
+            "block_size_div": block_size_div,
+            "block_strategy": block_strategy,
+            "block_min_frames": block_min_frames,
+            "block_max_frames": block_max_frames,
+            "block_beats_per": block_beats_per,
+            "block_hop_length": block_hop_length,
+            "block_n_fft": block_n_fft,
+            "block_peak_threshold": block_peak_threshold,
+            "block_peak_distance_s": block_peak_distance_s,
+            "block_structure_kernel": block_structure_kernel,
+            "block_structure_max_frames": block_structure_max_frames,
+            "block_bpm_min": block_bpm_min,
+            "block_bpm_max": block_bpm_max,
+            "block_crossover": block_crossover,
+            "block_crossover_frames": block_crossover_frames,
+            "block_adsr_attack_s": block_adsr_attack_s,
+            "block_adsr_decay_s": block_adsr_decay_s,
+            "block_adsr_sustain": block_adsr_sustain,
+            "block_adsr_release_s": block_adsr_release_s,
+            "block_adsr_curve": block_adsr_curve,
+            "s2i_mode": s2i_mode,
+            "s2i_colorspace": s2i_colorspace,
+            "s2i_safe_color": s2i_safe_color,
+            "s2i_chroma_strength": s2i_chroma_strength,
+            "s2i_chroma_clip": s2i_chroma_clip,
+            "i2s_mode": i2s_mode,
+            "i2s_colorspace": i2s_colorspace,
+            "i2s_pad_mode": i2s_pad_mode,
+            "i2s_impulse_len": i2s_impulse_len,
+            "i2s_radius_mode": i2s_radius_mode,
+            "i2s_phase_mode": i2s_phase_mode,
+            "i2s_smoothing": i2s_smoothing,
+            "i2s_impulse_norm": i2s_impulse_norm,
+            "i2s_out_norm": i2s_out_norm,
+            "i2s_n_bins": i2s_n_bins,
+            "audio_source": audio_source,
+        }
+        metadata_tags = _build_biconv_metadata(metadata_settings, variant="biconv")
         cmd = [
             "ffmpeg",
             "-y",
@@ -1826,8 +1938,9 @@ def biconv_video_to_files_stream(
             "256k",
             "-movflags",
             "+faststart",
-            str(out_video_p),
         ]
+        cmd += ffmpeg_metadata_args(metadata_tags)
+        cmd.append(str(out_video_p))
         subprocess.run(cmd, check=True)
         try:
             temp_video.unlink(missing_ok=True)

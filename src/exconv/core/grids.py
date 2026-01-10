@@ -43,12 +43,13 @@ def radial_grid_2d(H: int, W: int, norm: str = "unit") -> np.ndarray:
     if H <= 0 or W <= 0:
         raise ValueError("H and W must be positive")
 
-    k1, k2 = freq_grid_2d(H, W)
-    r = np.hypot(k1.astype(float), k2.astype(float))  # sqrt(k1^2 + k2^2)
-
     if norm == "unit":
-        rmax = float(np.hypot(H // 2, W // 2))  # correct for odd/even sizes
-        return r / (1.0 if rmax == 0.0 else rmax)
+        y = np.arange(-(H // 2), -(H // 2) + H, dtype=np.float32)[:, None]
+        x = np.arange(-(W // 2), -(W // 2) + W, dtype=np.float32)[None, :]
+        r = np.hypot(y, x)
+        rmax = np.hypot(np.float32(H // 2), np.float32(W // 2))
+        denom = rmax if rmax != 0 else np.float32(1.0)
+        return r / denom
 
     raise ValueError(f"Unknown norm {norm!r}")
 

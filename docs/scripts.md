@@ -46,7 +46,7 @@ and `docs/design.md` (video block and cross-modal sections).
   | `--dry-run` | off | Print planned outputs only. |
   | `--audio` | None | Use one audio file for all videos; otherwise extract from each video. |
   | `--fps` | None | Override FPS when metadata is wrong/missing. |
-  | `--fps-guard` | `ask` | Detect mismatched FPS metadata (`off`, `ask`, `auto`). |
+  | `--fps-guard` | `auto` | Detect mismatched FPS metadata (`off`, `ask`, `auto`). |
   | `--variants` | `both` | `all` also writes `<name>_video.*` (proc video + orig audio) and `<name>_audio.*` (orig video + proc audio). |
 
   | Pipeline (chaining + blocks) | Default | What it does |

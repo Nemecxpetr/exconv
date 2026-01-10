@@ -16,6 +16,11 @@ from __future__ import annotations
 from typing import Literal, Tuple
 import numpy as np
 
+try:
+    from scipy import fft as _fft
+except Exception:
+    import numpy.fft as _fft
+
 from exconv.dsp.windows import hann
 from exconv.dsp.normalize import normalize_impulse, normalize_to_reference
 
@@ -231,16 +236,18 @@ def _image_to_impulse_hist(
 def _radial_bins(shape: tuple[int, int], n_bins: int, mode: RadiusMode) -> np.ndarray:
     """Return integer bin indices per pixel for radial averaging."""
     h, w = shape
-    cy, cx = h / 2.0, w / 2.0
-    y, x = np.indices((h, w))
+    cy = np.float32(h / 2.0)
+    cx = np.float32(w / 2.0)
+    y = np.arange(h, dtype=np.float32)[:, None]
+    x = np.arange(w, dtype=np.float32)[None, :]
     r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-    r = r / (r.max() + 1e-8)
+    r = r / (r.max() + np.float32(1e-8))
 
     if mode == "linear":
-        bin_idx = np.minimum((r * (n_bins - 1)).astype(np.int64), n_bins - 1)
+        bin_idx = np.minimum((r * (n_bins - 1)).astype(np.int32), n_bins - 1)
     elif mode == "log":
-        r_log = np.log1p(r * 9.0) / np.log1p(9.0)  # denser near DC
-        bin_idx = np.minimum((r_log * (n_bins - 1)).astype(np.int64), n_bins - 1)
+        r_log = np.log1p(r * np.float32(9.0)) / np.log1p(np.float32(9.0))  # denser near DC
+        bin_idx = np.minimum((r_log * (n_bins - 1)).astype(np.int32), n_bins - 1)
     else:
         raise ValueError(f"Unknown radius mode: {mode}")
     return bin_idx
@@ -277,14 +284,17 @@ def _phase_profile_from_bins(
 def _spiral_phase_profile(phase_map: np.ndarray, n_bins: int) -> np.ndarray:
     """Deterministic spiral walk from center to edges to pick phases."""
     h, w = phase_map.shape
-    cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
-    y, x = np.indices(phase_map.shape)
+    cy = np.float32((h - 1) / 2.0)
+    cx = np.float32((w - 1) / 2.0)
+    y = np.arange(h, dtype=np.float32)[:, None]
+    x = np.arange(w, dtype=np.float32)[None, :]
     r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-    r = r / (r.max() + 1e-8)
-    theta = (np.arctan2(y - cy, x - cx) + np.pi) / (2 * np.pi)  # 0..1
+    r = r / (r.max() + np.float32(1e-8))
+    pi = np.float32(np.pi)
+    theta = (np.arctan2(y - cy, x - cx) + pi) / (np.float32(2.0) * pi)  # 0..1
 
     # Spiral-ish ordering: radius + a small angle term
-    key = r + 0.25 * theta
+    key = r + np.float32(0.25) * theta
     order = np.argsort(key.ravel(), kind="mergesort")
     phases_sorted = phase_map.ravel()[order]
 
@@ -303,7 +313,7 @@ def _minimum_phase_spectrum(mag_profile: np.ndarray, n_fft: int) -> np.ndarray:
     eps = 1e-8
     mag = np.maximum(mag_profile.astype(np.float32), eps)
     log_mag = np.log(mag)
-    cep = np.fft.irfft(log_mag, n=n_fft).astype(np.float32)
+    cep = _fft.irfft(log_mag, n=n_fft).astype(np.float32)
 
     cep_min = np.zeros_like(cep)
     cep_min[0] = cep[0]
@@ -312,7 +322,7 @@ def _minimum_phase_spectrum(mag_profile: np.ndarray, n_fft: int) -> np.ndarray:
     if n_fft % 2 == 0:
         cep_min[half] = cep[half]
 
-    spec_min = np.fft.rfft(cep_min, n=n_fft)
+    spec_min = _fft.rfft(cep_min, n=n_fft)
     return np.exp(spec_min).astype(np.complex64)
 
 
@@ -343,8 +353,8 @@ def _image_to_impulse_radial(
         if remove_dc:
             channel = channel - np.mean(channel)
 
-        spec = np.fft.fft2(channel)
-        shifted = np.fft.fftshift(spec)
+        spec = _fft.fft2(channel)
+        shifted = _fft.fftshift(spec)
         mag = np.abs(shifted)
 
         bin_idx = _radial_bins(channel.shape, n_bins=half_len, mode=radius_mode)
@@ -376,7 +386,7 @@ def _image_to_impulse_radial(
                 raise ValueError(f"Unknown phase_mode: {phase_mode}")
 
             H_half = profile.astype(np.float32) * np.exp(1j * phase)
-        h = np.fft.irfft(H_half, n=impulse_len).astype(np.float32)
+        h = _fft.irfft(H_half, n=impulse_len).astype(np.float32)
 
         h = normalize_impulse(h, impulse_norm)
 
@@ -438,15 +448,15 @@ def _convolve_with_impulse(
     H = []
     for c in range(out_channels):
         h_idx = min(c, h_channels - 1)
-        H.append(np.fft.rfft(h[:, h_idx], n=n_fft).astype(np.complex64))
+        H.append(_fft.rfft(h[:, h_idx], n=n_fft).astype(np.complex64))
 
     y_ch = []
 
     for c in range(out_channels):
         x_idx = min(c, n_channels - 1)
-        X = np.fft.rfft(x[:, x_idx], n=n_fft).astype(np.complex64)
+        X = _fft.rfft(x[:, x_idx], n=n_fft).astype(np.complex64)
         Y = X * H[c]
-        y_full = np.fft.irfft(Y, n=n_fft).astype(np.float32)
+        y_full = _fft.irfft(Y, n=n_fft).astype(np.float32)
         y_ch.append(y_full[:n_full])
 
     y = np.stack(y_ch, axis=-1) if out_channels > 1 else y_ch[0][:, None]

@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
-from exconv.video_meta import ffprobe_available, ffprobe_fps_info
+from exconv.video_meta import (
+    build_exconv_metadata,
+    ffmpeg_metadata_args,
+    ffprobe_available,
+    ffprobe_fps_info,
+)
 
 VIDEO_EXTS = {
     ".mp4",
@@ -178,6 +183,7 @@ def _mux(
     audio_src: Path,
     out_path: Path,
     *,
+    metadata: dict[str, str] | None = None,
     copy_audio: bool = False,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,8 +205,49 @@ def _mux(
         cmd += ["-c:a", "copy"]
     else:
         cmd += ["-c:a", "aac", "-b:a", "256k"]
+    cmd += ffmpeg_metadata_args(metadata)
     cmd += ["-movflags", "+faststart", str(out_path)]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _build_biconv_metadata(spec: JobSpec, *, variant: str) -> dict[str, str]:
+    settings = {
+        "tool": "video-folderbatch",
+        "fps": spec.fps,
+        "fps_policy": spec.fps_policy,
+        "serial_mode": spec.serial_mode,
+        "audio_length_mode": "pad-zero",
+        "block_size": spec.block_size,
+        "block_size_div": spec.block_size_div,
+        "block_strategy": spec.block_strategy,
+        "block_min_frames": spec.block_min_frames,
+        "block_max_frames": spec.block_max_frames,
+        "block_beats_per": spec.block_beats_per,
+        "block_crossover": spec.block_crossover,
+        "block_crossover_frames": spec.block_crossover_frames,
+        "block_adsr_attack_s": spec.block_adsr_attack_s,
+        "block_adsr_decay_s": spec.block_adsr_decay_s,
+        "block_adsr_sustain": spec.block_adsr_sustain,
+        "block_adsr_release_s": spec.block_adsr_release_s,
+        "block_adsr_curve": spec.block_adsr_curve,
+        "s2i_mode": spec.s2i_mode,
+        "s2i_colorspace": spec.s2i_colorspace,
+        "s2i_safe_color": spec.s2i_safe_color,
+        "s2i_chroma_strength": spec.s2i_chroma_strength,
+        "s2i_chroma_clip": spec.s2i_chroma_clip,
+        "i2s_mode": spec.i2s_mode,
+        "i2s_colorspace": spec.i2s_colorspace,
+        "i2s_phase_mode": spec.i2s_phase_mode,
+        "i2s_impulse_len": spec.i2s_impulse_len,
+        "i2s_pad_mode": "same-center",
+        "i2s_radius_mode": "linear",
+        "i2s_smoothing": "hann",
+        "i2s_impulse_norm": "energy",
+        "i2s_out_norm": "match_rms",
+        "i2s_n_bins": 256,
+        "audio_source": "video" if spec.audio_path is None else "external",
+    }
+    return build_exconv_metadata("video-biconv", variant, settings)
 
 
 def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
@@ -249,19 +296,30 @@ def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
         )
 
         if spec.write_main:
-            _mux(spec.tmp_video, spec.tmp_audio, spec.out_main, copy_audio=False)
+            metadata_main = _build_biconv_metadata(spec, variant="biconv")
+            _mux(
+                spec.tmp_video,
+                spec.tmp_audio,
+                spec.out_main,
+                metadata=metadata_main,
+                copy_audio=False,
+            )
         if spec.out_video_only is not None and spec.write_video_only:
+            metadata_video_only = _build_biconv_metadata(spec, variant="video-only")
             _mux(
                 spec.tmp_video,
                 spec.audio_source_for_video_only,
                 spec.out_video_only,
+                metadata=metadata_video_only,
                 copy_audio=True,
             )
         if spec.out_audio_only is not None and spec.write_audio_only:
+            metadata_audio_only = _build_biconv_metadata(spec, variant="audio-only")
             _mux(
                 spec.video_path,
                 spec.tmp_audio,
                 spec.out_audio_only,
+                metadata=metadata_audio_only,
                 copy_audio=False,
             )
         for tmp in (spec.tmp_video, spec.tmp_audio):
@@ -342,7 +400,7 @@ def _add_video_folderbatch_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--fps-guard",
         choices=["off", "ask", "auto"],
-        default="ask",
+        default="auto",
         help=(
             "Detect mismatched avg/r frame rates and prompt to override FPS. "
             "Use 'auto' to apply the recommendation without prompting; "

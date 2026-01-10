@@ -6,6 +6,11 @@ from typing import Iterable, Sequence, Tuple, Optional, Union
 import numpy as np
 
 try:
+    from scipy import fft as _scipy_fft
+except Exception:
+    _scipy_fft = None
+
+try:
     # Prefer SciPy's planner if available
     from scipy.fft import next_fast_len as _scipy_next_fast_len
 except Exception:
@@ -22,6 +27,9 @@ __all__ = [
     "linear_freq_multiply",
     "make_hermitian_symmetric_unshifted",
 ]
+
+# Pick scipy.fft when available (keeps float32/complex64), else fall back to numpy.fft.
+_FFT = _scipy_fft if _scipy_fft is not None else np.fft
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -177,9 +185,9 @@ def fftnd(x: ArrayLike, axes: AxesLike = None, real_input: bool = False, n: Opti
     """
     axes_t = _normalize_axes(x, axes)
     if real_input:
-        return np.fft.rfftn(x, s=n, axes=axes_t)
+        return _FFT.rfftn(x, s=n, axes=axes_t)
     else:
-        return np.fft.fftn(x, s=n, axes=axes_t)
+        return _FFT.fftn(x, s=n, axes=axes_t)
 
 
 def ifftnd(X: ArrayLike, axes: AxesLike = None, real_output: bool = False, n: Optional[Sequence[int]] = None) -> ArrayLike:
@@ -205,9 +213,9 @@ def ifftnd(X: ArrayLike, axes: AxesLike = None, real_output: bool = False, n: Op
     """
     axes_t = _normalize_axes(X, axes)
     if real_output:
-        return np.fft.irfftn(X, s=n, axes=axes_t)
+        return _FFT.irfftn(X, s=n, axes=axes_t)
     else:
-        return np.fft.ifftn(X, s=n, axes=axes_t)
+        return _FFT.ifftn(X, s=n, axes=axes_t)
 
 
 # ---------------------------------------------------------------------------

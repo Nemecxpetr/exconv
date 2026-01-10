@@ -5,6 +5,11 @@ from typing import Literal, Tuple
 
 import numpy as np
 
+try:
+    from scipy import fft as _fft
+except Exception:
+    import numpy.fft as _fft
+
 from exconv.core import fftnd, ifftnd, radial_grid_2d
 from exconv.dsp.normalize import normalize_range_01, normalize_chroma_midpoint, clip_01
 from exconv.io import rgb_to_luma, luma_to_rgb, to_stereo
@@ -22,14 +27,14 @@ def _rfft_magnitude(sig: np.ndarray) -> np.ndarray:
     1D magnitude spectrum normalized to max=1.
     If the signal is silent, returns an all-ones curve (identity filter).
     """
-    sig = np.asarray(sig, dtype=np.float64).ravel()
-    spec = np.abs(np.fft.rfft(sig))
+    sig = np.asarray(sig, dtype=np.float32).ravel()
+    spec = np.abs(_fft.rfft(sig))
     m = float(spec.max()) if spec.size > 0 else 0.0
     if m > 0.0:
         spec = spec / m
     else:
-        spec = np.ones_like(spec, dtype=np.float64)
-    return spec.astype(np.float32)
+        spec = np.ones_like(spec, dtype=np.float32)
+    return spec.astype(np.float32, copy=False)
 
 
 def _radial_filter_from_curve(curve: np.ndarray, H: int, W: int) -> np.ndarray:
@@ -44,7 +49,8 @@ def _radial_filter_from_curve(curve: np.ndarray, H: int, W: int) -> np.ndarray:
     if curve.size <= 1:
         return np.ones((H, W), dtype=np.float32)
 
-    idx = np.minimum((rho * (curve.size - 1)).astype(int), curve.size - 1)
+    max_idx = np.int32(curve.size - 1)
+    idx = np.minimum((rho * max_idx).astype(np.int32), max_idx)
     H2 = curve[idx]
     return H2.astype(np.float32)
 
@@ -87,7 +93,7 @@ def _fft_filter_apply(img2d: np.ndarray, H2: np.ndarray) -> np.ndarray:
     img2d, H2 : (H,W)
     """
     img2d = np.asarray(img2d, dtype=np.float32)
-    H2 = np.asarray(H2, dtype=np.complex64)
+    H2 = np.asarray(H2, dtype=np.float32)
 
     F = fftnd(img2d, axes=(0, 1), real_input=False)
     Y = F * H2
