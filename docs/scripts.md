@@ -7,6 +7,9 @@ default `samples/` layout.
 For parameter meanings and cross-references, see `docs/api.md` (CLI section)
 and `docs/design.md` (video block and cross-modal sections).
 
+## Examples gallery
+- Instagram highlight: [Example highlight on Instagram](https://www.instagram.com/stories/highlights/18441302296108489/)
+
 ## Batch helpers (CLI)
 
 ### Settings files (shared)

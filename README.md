@@ -359,6 +359,7 @@ Outputs: processed video and audio files written to the given paths.
 - **API reference**: [`docs/api.md`](docs/api.md) — signatures and parameter
   semantics.
 - **CLI + scripts**: [`docs/scripts.md`](docs/scripts.md) - batch subcommands and legacy helpers.
+- **Instagram highlight**: [Example highlight on Instagram](https://www.instagram.com/stories/highlights/18441302296108489/) - visual examples.
 - **Changelog**: [`CHANGELOG.md`](CHANGELOG.md) — latest additions.
 
 ---
