@@ -10,6 +10,8 @@ __all__ = [
     "parse_fraction",
     "parse_float",
     "ffprobe_fps_info",
+    "build_exconv_metadata",
+    "ffmpeg_metadata_args",
 ]
 
 _FFPROBE_AVAILABLE: bool | None = None
@@ -109,3 +111,39 @@ def ffprobe_fps_info(
     if duration is None:
         duration = parse_float((data.get("format") or {}).get("duration"))
     return avg, r, duration
+
+
+def build_exconv_metadata(
+    process: str,
+    variant: str,
+    settings: dict[str, object],
+) -> dict[str, str]:
+    payload = {
+        "process": process,
+        "variant": variant,
+        "settings": settings,
+    }
+    payload_json = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return {
+        "exconv_process": str(process),
+        "exconv_variant": str(variant),
+        "exconv_settings": payload_json,
+    }
+
+
+def ffmpeg_metadata_args(metadata: dict[str, str] | None) -> list[str]:
+    if not metadata:
+        return []
+    args: list[str] = []
+    for key in sorted(metadata):
+        value = metadata[key]
+        if value is None:
+            continue
+        args += ["-metadata", f"{key}={value}"]
+    return args
