@@ -93,8 +93,14 @@ and `docs/design.md` (video block and cross-modal sections).
   | --- | --- | --- |
   | `--i2s-mode` | `radial` | Image->sound impulse (`flat`, `hist`, `radial`). |
   | `--i2s-colorspace` | `ycbcr-mid-side` | Image->sound colorspace (`luma`, `rgb-mean`, `rgb-stereo`, `ycbcr-mid-side`). |
-  | `--i2s-phase-mode` | `spiral` | Phase strategy (`zero`, `random`, `image`, `min-phase`, `spiral`). |
+  | `--i2s-pad-mode` | `same-center` | Convolution pad mode (`full`, `same-center`, `same-first`). |
   | `--i2s-impulse-len` | `frame` | Impulse length (`int`, `auto`, `frame`). |
+  | `--i2s-radius-mode` | `linear` | Radial binning (`linear`, `log`) for `radial` mode. |
+  | `--i2s-phase-mode` | `spiral` | Phase strategy (`zero`, `random`, `image`, `min-phase`, `spiral`). |
+  | `--i2s-smoothing` | `hann` | Radial profile smoothing (`none`, `hann`). |
+  | `--i2s-impulse-norm` | `energy` | Impulse normalization (`energy`, `peak`, `none`). |
+  | `--i2s-out-norm` | `match_rms` | Output normalization (`match_rms`, `match_peak`, `none`). |
+  | `--i2s-n-bins` | `256` | Histogram bins (`hist` mode). |
 
 Note: `scripts/_video_folderbatch.py` still exists as a legacy wrapper; use
 `exconv video-folderbatch` for the supported interface.

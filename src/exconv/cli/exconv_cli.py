@@ -31,7 +31,9 @@ from exconv.io import (
     write_image,
     as_uint8,
     write_video_frames,
+    upscale_image,
 )  # audio/image IO 
+from exconv.io.image import UPSCALE_METHODS
 from exconv.conv1d import Audio, auto_convolve as audio_auto_convolve  # :contentReference[oaicite:2]{index=2}
 from exconv.conv2d import (
     image_auto_convolve,
@@ -145,6 +147,29 @@ def _parse_gaussian_kernel_spec(spec: str) -> np.ndarray:
     truncate_val: float = float(truncate) if truncate is not None else 3.0
 
     return gaussian_2d(sigma=sigma, radius=radius_val, truncate=truncate_val, normalize=True)
+
+
+def _should_upscale(args: argparse.Namespace) -> bool:
+    if not hasattr(args, "upscale") or not hasattr(args, "upscale_method"):
+        return False
+    method = str(args.upscale_method).lower()
+    if method.startswith("opencv"):
+        return True
+    try:
+        return abs(float(args.upscale) - 1.0) > 1e-9
+    except (TypeError, ValueError):
+        return True
+
+
+def _apply_upscale(img_u8: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+    if not _should_upscale(args):
+        return img_u8
+    return upscale_image(
+        img_u8,
+        scale=args.upscale,
+        method=args.upscale_method,
+        model=args.upscale_model,
+    )
 
 
 # ---------------------------------------------------------------------------

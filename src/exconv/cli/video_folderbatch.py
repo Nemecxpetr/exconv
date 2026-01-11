@@ -179,8 +179,14 @@ class JobSpec:
     s2i_chroma_clip: float
     i2s_mode: str
     i2s_colorspace: str
+    i2s_pad_mode: str
+    i2s_radius_mode: str
     i2s_phase_mode: str
+    i2s_smoothing: str
     i2s_impulse_len: str
+    i2s_impulse_norm: str
+    i2s_out_norm: str
+    i2s_n_bins: int
     audio_source_for_video_only: Path
     write_main: bool
     write_video_only: bool
@@ -248,12 +254,12 @@ def _build_biconv_metadata(spec: JobSpec, *, variant: str) -> dict[str, str]:
         "i2s_colorspace": spec.i2s_colorspace,
         "i2s_phase_mode": spec.i2s_phase_mode,
         "i2s_impulse_len": spec.i2s_impulse_len,
-        "i2s_pad_mode": "same-center",
-        "i2s_radius_mode": "linear",
-        "i2s_smoothing": "hann",
-        "i2s_impulse_norm": "energy",
-        "i2s_out_norm": "match_rms",
-        "i2s_n_bins": 256,
+        "i2s_pad_mode": spec.i2s_pad_mode,
+        "i2s_radius_mode": spec.i2s_radius_mode,
+        "i2s_smoothing": spec.i2s_smoothing,
+        "i2s_impulse_norm": spec.i2s_impulse_norm,
+        "i2s_out_norm": spec.i2s_out_norm,
+        "i2s_n_bins": spec.i2s_n_bins,
         "audio_source": "video" if spec.audio_path is None else "external",
     }
     return build_exconv_metadata("video-biconv", variant, settings)
@@ -291,14 +297,14 @@ def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
             s2i_colorspace=spec.s2i_colorspace,
             i2s_mode=spec.i2s_mode,
             i2s_colorspace=spec.i2s_colorspace,
-            i2s_pad_mode="same-center",
+            i2s_pad_mode=spec.i2s_pad_mode,
             i2s_impulse_len=spec.i2s_impulse_len,
-            i2s_radius_mode="linear",
+            i2s_radius_mode=spec.i2s_radius_mode,
             i2s_phase_mode=spec.i2s_phase_mode,
-            i2s_smoothing="hann",
-            i2s_impulse_norm="energy",
-            i2s_out_norm="match_rms",
-            i2s_n_bins=256,
+            i2s_smoothing=spec.i2s_smoothing,
+            i2s_impulse_norm=spec.i2s_impulse_norm,
+            i2s_out_norm=spec.i2s_out_norm,
+            i2s_n_bins=spec.i2s_n_bins,
             s2i_safe_color=spec.s2i_safe_color,
             s2i_chroma_strength=spec.s2i_chroma_strength,
             s2i_chroma_clip=spec.s2i_chroma_clip,
@@ -546,15 +552,51 @@ def _add_video_folderbatch_args(parser: argparse.ArgumentParser) -> None:
         help="Image->sound colorspace.",
     )
     parser.add_argument(
+        "--i2s-pad-mode",
+        choices=["full", "same-center", "same-first"],
+        default="same-center",
+        help="Image->sound convolution pad mode.",
+    )
+    parser.add_argument(
+        "--i2s-impulse-len",
+        default="frame",
+        help="Impulse length (integer, 'auto', or 'frame'=one frame's worth of samples).",
+    )
+    parser.add_argument(
+        "--i2s-radius-mode",
+        choices=["linear", "log"],
+        default="linear",
+        help="Radial binning (radial mode).",
+    )
+    parser.add_argument(
         "--i2s-phase-mode",
         choices=["zero", "random", "image", "min-phase", "spiral"],
         default="spiral",
         help="Phase strategy (radial mode).",
     )
     parser.add_argument(
-        "--i2s-impulse-len",
-        default="frame",
-        help="Impulse length (integer, 'auto', or 'frame'=one frame's worth of samples).",
+        "--i2s-smoothing",
+        choices=["none", "hann"],
+        default="hann",
+        help="Smoothing on radial profile.",
+    )
+    parser.add_argument(
+        "--i2s-impulse-norm",
+        choices=["energy", "peak", "none"],
+        default="energy",
+        help="Impulse normalization.",
+    )
+    parser.add_argument(
+        "--i2s-out-norm",
+        choices=["match_rms", "match_peak", "none"],
+        default="match_rms",
+        help="Output normalization for convolved audio.",
+    )
+    parser.add_argument(
+        "--i2s-n-bins",
+        type=int,
+        default=256,
+        help="Histogram bins (hist mode).",
     )
     parser.add_argument(
         "--variants",
@@ -590,6 +632,8 @@ def _cmd_video_folderbatch(args: argparse.Namespace) -> int:
         raise SystemExit("--block-adsr-release-s must be >= 0")
     if not (0.0 <= args.block_adsr_sustain <= 1.0):
         raise SystemExit("--block-adsr-sustain must be in [0, 1]")
+    if args.i2s_n_bins <= 0:
+        raise SystemExit("--i2s-n-bins must be positive")
 
     if args.blas_threads is not None:
         if args.blas_threads <= 0:
@@ -700,8 +744,14 @@ def _cmd_video_folderbatch(args: argparse.Namespace) -> int:
                 s2i_chroma_clip=float(args.s2i_chroma_clip),
                 i2s_mode=args.i2s_mode,
                 i2s_colorspace=args.i2s_colorspace,
+                i2s_pad_mode=args.i2s_pad_mode,
+                i2s_radius_mode=args.i2s_radius_mode,
                 i2s_phase_mode=args.i2s_phase_mode,
+                i2s_smoothing=args.i2s_smoothing,
                 i2s_impulse_len=str(args.i2s_impulse_len),
+                i2s_impulse_norm=args.i2s_impulse_norm,
+                i2s_out_norm=args.i2s_out_norm,
+                i2s_n_bins=int(args.i2s_n_bins),
                 audio_source_for_video_only=audio_src_for_video_only,
                 write_main=write_main,
                 write_video_only=write_video_only,
