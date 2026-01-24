@@ -27,7 +27,13 @@ from exconv.video_meta import (
     ffprobe_fps_info,
     parse_float,
 )
-from exconv.io import read_audio, write_audio, read_video_frames, write_video_frames
+from exconv.io import (
+    read_audio,
+    write_audio,
+    read_video_frames,
+    write_video_frames,
+    upscale_image,
+)
 from exconv.conv1d.audio import Audio, auto_convolve as audio_auto_convolve
 from .sound2image import spectral_sculpt, Mode, ColorMode
 from .image2sound import (
@@ -296,6 +302,44 @@ def _blend_frames(
     return [frame for frame in blended]
 
 
+def _should_upscale(scale: float, method: str) -> bool:
+    if str(method).lower().startswith("opencv"):
+        return True
+    try:
+        return abs(float(scale) - 1.0) > 1e-9
+    except (TypeError, ValueError):
+        return True
+
+
+def _maybe_upscale_frame(
+    frame_u8: np.ndarray,
+    *,
+    scale: float,
+    method: str,
+    model: str | Path | None,
+) -> np.ndarray:
+    if not _should_upscale(scale, method):
+        return frame_u8
+    return upscale_image(frame_u8, scale=scale, method=method, model=model)
+
+
+def _maybe_upscale_frames(
+    frames: list[np.ndarray],
+    *,
+    scale: float,
+    method: str,
+    model: str | Path | None,
+) -> list[np.ndarray]:
+    if not frames:
+        return frames
+    if not _should_upscale(scale, method):
+        return frames
+    return [
+        _maybe_upscale_frame(frame, scale=scale, method=method, model=model)
+        for frame in frames
+    ]
+
+
 def _segments_from_block_size(n_frames: int, block_size: int) -> list[tuple[int, int]]:
     if n_frames <= 0:
         return []
@@ -439,6 +483,9 @@ def sound2image_video_arrays(
     mode: Mode = "mono",
     colorspace: ColorMode = "luma",
     audio_out_mode: AudioVideoMode = "per-buffer-auto",
+    upscale: float = 1.0,
+    upscale_method: str = "lanczos",
+    upscale_model: str | Path | None = None,
 ) -> Tuple[List[np.ndarray], np.ndarray]:
     ...
 
@@ -452,6 +499,9 @@ def sound2image_video_arrays(
     mode="mono",
     colorspace="luma",
     audio_out_mode="per-buffer-auto",
+    upscale=1.0,
+    upscale_method="lanczos",
+    upscale_model=None,
 ):
     """
     Apply sound->image spectral sculpting per frame, and build an audio track.
@@ -500,6 +550,7 @@ def sound2image_video_arrays(
     processed_frames: List[np.ndarray] = []
     audio_out_chunks: List[np.ndarray] = []
 
+    apply_upscale = _should_upscale(upscale, upscale_method)
     frame_iter = tqdm(frames, total=n_frames, desc="sound->image video", unit="frame")
     for idx, frame in enumerate(frame_iter):
         frame = np.asarray(frame)
@@ -530,6 +581,13 @@ def sound2image_video_arrays(
         else:
             frame_u8 = np.clip(out_frame, 0, 255).astype(np.uint8)
 
+        if apply_upscale:
+            frame_u8 = _maybe_upscale_frame(
+                frame_u8,
+                scale=upscale,
+                method=upscale_method,
+                model=upscale_model,
+            )
         processed_frames.append(frame_u8)
 
         # --- audio processing: per-buffer auto-convolution or original ---
@@ -580,6 +638,9 @@ def sound2image_video_from_files(
     mode: Mode = "mono",
     colorspace: ColorMode = "luma",
     audio_out_mode: AudioVideoMode = "per-buffer-auto",
+    upscale: float = 1.0,
+    upscale_method: str = "lanczos",
+    upscale_model: str | Path | None = None,
     out_video: str | Path | None = None,
     out_audio: str | Path | None = None,
 ) -> Tuple[List[np.ndarray], np.ndarray, float, int]:
@@ -636,6 +697,9 @@ def sound2image_video_from_files(
         mode=mode,
         colorspace=colorspace,
         audio_out_mode=audio_out_mode,
+        upscale=upscale,
+        upscale_method=upscale_method,
+        upscale_model=upscale_model,
     )
 
     # --- optional writing ---
@@ -700,6 +764,10 @@ def biconv_video_arrays(
     block_adsr_sustain: float = 1.0,
     block_adsr_release_s: float = 0.0,
     block_adsr_curve: BlockEnvelopeCurve = "linear",
+    # output upscaling
+    upscale: float = 1.0,
+    upscale_method: str = "lanczos",
+    upscale_model: str | Path | None = None,
     # s2i color controls
     s2i_safe_color: bool = True,
     s2i_chroma_strength: float = 0.5,
@@ -1028,6 +1096,13 @@ def biconv_video_arrays(
 
     if prev_tail_frames:
         frames_out.extend(prev_tail_frames)
+    if _should_upscale(upscale, upscale_method):
+        frames_out = _maybe_upscale_frames(
+            frames_out,
+            scale=upscale,
+            method=upscale_method,
+            model=upscale_model,
+        )
     if prev_tail_audio is not None:
         audio_chunks.append(prev_tail_audio)
 
@@ -1078,6 +1153,9 @@ def biconv_video_from_files(
     block_adsr_sustain: float = 1.0,
     block_adsr_release_s: float = 0.0,
     block_adsr_curve: BlockEnvelopeCurve = "linear",
+    upscale: float = 1.0,
+    upscale_method: str = "lanczos",
+    upscale_model: str | Path | None = None,
     s2i_safe_color: bool = True,
     s2i_chroma_strength: float = 0.5,
     s2i_chroma_clip: float = 0.25,
@@ -1163,6 +1241,9 @@ def biconv_video_from_files(
         block_adsr_sustain=block_adsr_sustain,
         block_adsr_release_s=block_adsr_release_s,
         block_adsr_curve=block_adsr_curve,
+        upscale=upscale,
+        upscale_method=upscale_method,
+        upscale_model=upscale_model,
         s2i_safe_color=s2i_safe_color,
         s2i_chroma_strength=s2i_chroma_strength,
         s2i_chroma_clip=s2i_chroma_clip,
@@ -1223,6 +1304,9 @@ def biconv_video_from_files(
             "block_adsr_sustain": block_adsr_sustain,
             "block_adsr_release_s": block_adsr_release_s,
             "block_adsr_curve": block_adsr_curve,
+            "upscale": upscale,
+            "upscale_method": upscale_method,
+            "upscale_model": str(upscale_model) if upscale_model is not None else None,
             "s2i_mode": s2i_mode,
             "s2i_colorspace": s2i_colorspace,
             "s2i_safe_color": s2i_safe_color,
@@ -1321,6 +1405,9 @@ def biconv_video_to_files_stream(
     block_adsr_sustain: float = 1.0,
     block_adsr_release_s: float = 0.0,
     block_adsr_curve: BlockEnvelopeCurve = "linear",
+    upscale: float = 1.0,
+    upscale_method: str = "lanczos",
+    upscale_model: str | Path | None = None,
     s2i_safe_color: bool = True,
     s2i_chroma_strength: float = 0.5,
     s2i_chroma_clip: float = 0.25,
@@ -1548,9 +1635,18 @@ def biconv_video_to_files_stream(
             nonlocal n_frames_written
             if not frames_list:
                 return
+            if video_writer is None:
+                n_frames_written += len(frames_list)
+                return
+            if _should_upscale(upscale, upscale_method):
+                frames_list = _maybe_upscale_frames(
+                    frames_list,
+                    scale=upscale,
+                    method=upscale_method,
+                    model=upscale_model,
+                )
             for frame in frames_list:
-                if video_writer is not None:
-                    video_writer.append_data(frame)
+                video_writer.append_data(frame)
                 n_frames_written += 1
 
         def _write_audio(seg: np.ndarray) -> None:
@@ -1901,6 +1997,9 @@ def biconv_video_to_files_stream(
             "block_adsr_sustain": block_adsr_sustain,
             "block_adsr_release_s": block_adsr_release_s,
             "block_adsr_curve": block_adsr_curve,
+            "upscale": upscale,
+            "upscale_method": upscale_method,
+            "upscale_model": str(upscale_model) if upscale_model is not None else None,
             "s2i_mode": s2i_mode,
             "s2i_colorspace": s2i_colorspace,
             "s2i_safe_color": s2i_safe_color,

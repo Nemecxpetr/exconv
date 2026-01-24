@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from itertools import combinations
 from pathlib import Path
@@ -10,7 +11,16 @@ from typing import Dict, List, Tuple
 import numpy as np
 import imageio.v3 as iio
 
-from exconv.io import read_audio, write_audio, read_image, write_image, as_uint8, write_video_frames
+from exconv.io import (
+    read_audio,
+    write_audio,
+    read_image,
+    write_image,
+    as_uint8,
+    write_video_frames,
+    upscale_image,
+)
+from exconv.io.image import UPSCALE_METHODS
 from exconv.conv1d import (
     Audio,
     auto_convolve as audio_auto_convolve,
@@ -23,7 +33,9 @@ from exconv.cli.settings import (
     load_settings,
     select_settings,
     apply_settings_to_parser,
+    parse_explicit_args,
     serialize_args,
+    serialize_explicit_args,
     save_settings,
 )
 
@@ -82,6 +94,15 @@ def _mux_audio(video_src: Path, audio_src: Path, out_path: Path) -> None:
         str(out_path),
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _should_upscale(scale: float, method: str) -> bool:
+    if str(method).lower().startswith("opencv"):
+        return True
+    try:
+        return abs(float(scale) - 1.0) > 1e-9
+    except (TypeError, ValueError):
+        return True
 
 
 def process_audio_batch(
@@ -167,6 +188,9 @@ def process_sound2image_batch(
     animate_fps: float = 10.0,
     animate_loop: int = 0,
     animate_audio: bool = False,
+    upscale: float = 1.0,
+    upscale_method: str = "lanczos",
+    upscale_model: str | None = None,
 ) -> None:
     """
     For every image in image_dir and every audio in audio_dir, run spectral_sculpt.
@@ -218,6 +242,13 @@ def process_sound2image_batch(
                 continue
 
             out_u8 = as_uint8(out_f)
+            if _should_upscale(upscale, upscale_method):
+                out_u8 = upscale_image(
+                    out_u8,
+                    scale=upscale,
+                    method=upscale_method,
+                    model=upscale_model,
+                )
             out_name = f"{img_path.stem}__S2I__{a_path.stem}.png"
             out_path = out_dir / out_name
             write_image(out_path, out_u8)
@@ -329,6 +360,23 @@ def _add_folderbatch_args(parser: argparse.ArgumentParser) -> None:
         help="Disable sound2image output normalization to [0,1].",
     )
     g_s2i.add_argument(
+        "--s2i-upscale",
+        type=float,
+        default=1.0,
+        help="Optional output scale factor (1.0 disables).",
+    )
+    g_s2i.add_argument(
+        "--s2i-upscale-method",
+        choices=UPSCALE_METHODS,
+        default="lanczos",
+        help="Upscale method; opencv-* requires --s2i-upscale-model.",
+    )
+    g_s2i.add_argument(
+        "--s2i-upscale-model",
+        default=None,
+        help="Model path for opencv-* upscalers (e.g. .pb).",
+    )
+    g_s2i.add_argument(
         "--s2i-animate",
         action="store_true",
         help="Write per-audio animations from the sound2image outputs.",
@@ -427,6 +475,9 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
             animate_fps=args.s2i_animate_fps,
             animate_loop=args.s2i_animate_loop,
             animate_audio=animate_audio,
+            upscale=args.s2i_upscale,
+            upscale_method=args.s2i_upscale_method,
+            upscale_model=args.s2i_upscale_model,
         )
     else:
         if not img_dir.exists():
@@ -464,16 +515,49 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
-    cleaned_argv, settings_path, save_path = strip_settings_args(raw_argv)
+    cleaned_argv, settings_path, save_path, update_settings, show_settings = strip_settings_args(raw_argv)
+    if update_settings:
+        if not save_path:
+            raise SystemExit("--update-settings requires --save-settings <path>.")
+        args = parse_explicit_args(parser, cleaned_argv)
+        exclude = {
+            "settings_path",
+            "save_settings_path",
+            "update_settings",
+            "show_settings",
+            "func",
+        }
+        patch = serialize_explicit_args(args, parser, exclude=exclude)
+        if not patch:
+            raise SystemExit("--update-settings requires at least one option to update.")
+        save_path_obj = Path(save_path)
+        base: dict[str, object] = {}
+        if save_path_obj.exists():
+            data = load_settings(save_path_obj)
+            base = select_settings(data, "folderbatch")
+        merged = dict(base)
+        merged.update(patch)
+        save_settings(save_path_obj, merged, command="folderbatch")
+        return 0
     if settings_path:
         settings_data = load_settings(Path(settings_path))
         settings = select_settings(settings_data, "folderbatch")
         apply_settings_to_parser(parser, settings)
     args = parser.parse_args(cleaned_argv)
-    if save_path:
-        exclude = {"settings_path", "save_settings_path", "func"}
+    if save_path or show_settings:
+        exclude = {
+            "settings_path",
+            "save_settings_path",
+            "update_settings",
+            "show_settings",
+            "func",
+        }
         settings_out = serialize_args(args, parser, exclude=exclude)
-        save_settings(Path(save_path), settings_out, command="folderbatch")
+        if save_path:
+            save_settings(Path(save_path), settings_out, command="folderbatch")
+        if show_settings:
+            print(json.dumps(settings_out, indent=2, sort_keys=True, ensure_ascii=True))
+            return 0
     return _cmd_folderbatch(args)
 
 

@@ -9,6 +9,7 @@ from exconv.xmodal import (
     AudioLengthMode,
 )
 from exconv.cli.settings import add_settings_args
+from exconv.io.image import UPSCALE_METHODS
 
 
 def _path(p: str | Path) -> Path:
@@ -60,6 +61,9 @@ def run_video_biconv(
     block_adsr_sustain: float,
     block_adsr_release_s: float,
     block_adsr_curve: str,
+    upscale: float = 1.0,
+    upscale_method: str = "lanczos",
+    upscale_model: Path | None = None,
     s2i_mode: str,
     s2i_colorspace: str,
     i2s_mode: str,
@@ -116,6 +120,9 @@ def run_video_biconv(
         block_adsr_sustain=block_adsr_sustain,
         block_adsr_release_s=block_adsr_release_s,
         block_adsr_curve=block_adsr_curve,  # type: ignore[arg-type]
+        upscale=upscale,
+        upscale_method=upscale_method,
+        upscale_model=upscale_model,
         out_video=out_video,
         out_audio=out_audio,
         mux_output=mux,
@@ -291,6 +298,23 @@ def register_video_biconv_subcommand(subparsers: argparse._SubParsersAction) -> 
         default="linear",
         help="Curve shaping for ADSR attack/decay/release segments.",
     )
+    p.add_argument(
+        "--upscale",
+        type=float,
+        default=1.0,
+        help="Optional output scale factor (1.0 disables).",
+    )
+    p.add_argument(
+        "--upscale-method",
+        choices=UPSCALE_METHODS,
+        default="lanczos",
+        help="Upscale method; opencv-* requires --upscale-model.",
+    )
+    p.add_argument(
+        "--upscale-model",
+        default=None,
+        help="Model path for opencv-* upscalers (e.g. .pb).",
+    )
     # sound->image
     p.add_argument(
         "--s2i-mode",
@@ -433,6 +457,9 @@ def _cmd_video_biconv(args: argparse.Namespace) -> int:
         block_adsr_sustain=args.block_adsr_sustain,
         block_adsr_release_s=args.block_adsr_release_s,
         block_adsr_curve=args.block_adsr_curve,
+        upscale=args.upscale,
+        upscale_method=args.upscale_method,
+        upscale_model=_path(args.upscale_model) if args.upscale_model else None,
         s2i_mode=args.s2i_mode,
         s2i_colorspace=args.s2i_colorspace,
         i2s_mode=args.i2s_mode,

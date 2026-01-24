@@ -436,7 +436,7 @@ from exconv.io import (
 
     read_audio, read_segment, write_audio, to_mono, to_stereo,
 
-    read_image, write_image, as_float32, as_uint8, rgb_to_luma, luma_to_rgb,
+    read_image, write_image, as_float32, as_uint8, rgb_to_luma, luma_to_rgb, upscale_image,
 
 )
 
@@ -531,6 +531,12 @@ from exconv.io import (
 - `luma_to_rgb(x, dtype=None)`  
 
   2D luma  `(H, W, 3)` RGB by channel replication.
+
+
+- `upscale_image(x, scale=1.0, method="lanczos", model=None)`  
+
+  Resize/upscale via Pillow resampling or OpenCV DNN super-res; returns uint8.
+  OpenCV backends (opencv-*) require a .pb model and opencv-contrib-python (installed with exconv).
 
 
 
@@ -968,10 +974,12 @@ The CLI entry point is `exconv.cli.exconv_cli:main`, registered as `exconv`
 in `pyproject.toml`.
 
 Settings files (shared):
-- `--settings <path>` loads defaults for the command from JSON or CSV.
-- `--save-settings <path>` writes current option values (non-positional) for the command.
-- JSON can store per-command blocks keyed by command name; CSV is flat `key,value`.
-- CLI flags override loaded settings.
+  - `--settings <path>` loads defaults for the command from JSON or CSV.
+  - `--save-settings <path>` writes current option values (non-positional) for the command.
+  - `--show-settings` prints the resolved option values as JSON and exits.
+  - `--save-settings <path> --update-settings` updates only the provided option values in-place and exits.
+  - JSON can store per-command blocks keyed by command name; CSV is flat `key,value`.
+  - CLI flags override loaded settings.
 
 
 
@@ -1021,6 +1029,10 @@ Uses `image_auto_convolve` or `image_pair_convolve` with Gaussian kernels
 
 parsed by `_parse_gaussian_kernel_spec`.
 
+Optional upscaling: `--upscale <factor>` with `--upscale-method`
+(`lanczos`, `bicubic`, or `opencv-*`). OpenCV methods require
+`--upscale-model` (opencv-contrib-python ships with exconv).
+
 
 
 ### 7.4 `sound2image`
@@ -1036,6 +1048,9 @@ exconv sound2image     --img img.png     --audio audio.wav     --out sculpted.pn
 
 
 Provides a CLI faade over `spectral_sculpt` for quick experiments.
+Optional upscaling: `--upscale <factor>` with `--upscale-method`
+(`lanczos`, `bicubic`, or `opencv-*`). OpenCV methods require
+`--upscale-model` (opencv-contrib-python ships with exconv).
 See `docs/design.md` sections 6.1-6.2 for the sound->image mapping details.
 
 ### 7.5 `video-biconv`
@@ -1061,6 +1076,9 @@ Key notes:
 - For a deeper explanation of serial chaining and block parameters, see `docs/design.md` (section 6.4).
 - Sound->image options mirror `spectral_sculpt` (`--s2i-mode` mono/stereo/mid-side, `--s2i-colorspace` luma/color).
 - Image->sound options mirror the image2sound demo (`--i2s-mode` flat/hist/radial with colorspace/phase/padding/length controls).
+Optional upscaling: `--upscale <factor>` with `--upscale-method`
+(`lanczos`, `bicubic`, or `opencv-*`). OpenCV methods require
+`--upscale-model` (opencv-contrib-python ships with exconv).
 See `docs/design.md` section 6.3 for image->sound details and section 6.4 for block behavior.
 
 ### 7.6 `folderbatch`

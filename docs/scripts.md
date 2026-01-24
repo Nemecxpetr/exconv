@@ -15,6 +15,8 @@ and `docs/design.md` (video block and cross-modal sections).
 ### Settings files (shared)
 - Use `--settings <path>` to load option defaults from a JSON or CSV file.
 - Use `--save-settings <path>` to write the current option values (non-positional) for the command.
+- Use `--show-settings` to print the resolved option values as JSON and exit.
+- Use `--save-settings <path> --update-settings` to update only the provided option values in-place and exit.
 - JSON can store multiple commands by name (e.g., `video-folderbatch`, `video-biconv`); CSV is flat `key,value`.
 - CLI flags always override values loaded from settings.
 
@@ -57,6 +59,9 @@ and `docs/design.md` (video block and cross-modal sections).
   | `--fps` | None | Override FPS when metadata is wrong/missing. |
   | `--fps-guard` | `auto` | Detect mismatched FPS metadata (`off`, `ask`, `auto`). |
   | `--variants` | `both` | `all` also writes `<name>_video.*` (proc video + orig audio) and `<name>_audio.*` (orig video + proc audio). |
+  | `--upscale` | `1.0` | Output scale factor (1.0 disables). |
+  | `--upscale-method` | `lanczos` | Upscale method; opencv-* requires a model file. |
+  | `--upscale-model` | None | Model path for opencv-* upscalers. |
 
   | Pipeline (chaining + blocks) | Default | What it does |
   | --- | --- | --- |
@@ -122,7 +127,9 @@ Note: `scripts/_video_folderbatch.py` still exists as a legacy wrapper; use
   `--audio-order <int>` (self-conv order), `--audio-circular`,
   `--audio-normalize {rms,peak,none}`, `--audio-subtype PCM_16|PCM_24|FLOAT`.
 - Sound->image flags: `--s2i-mode {mono,stereo,mid-side}`,
-  `--s2i-colorspace {luma,color}`, `--s2i-no-normalize` to keep raw output.
+  `--s2i-colorspace {luma,color}`, `--s2i-no-normalize` to keep raw output,
+  `--s2i-upscale <factor>`, `--s2i-upscale-method <name>`,
+  `--s2i-upscale-model <path>` (for opencv-* backends).
 - Animation flags (per audio file): `--s2i-animate` (enable), `--s2i-animate-format {gif,mp4,both}` (default `mp4`),
   `--s2i-animate-fps <float>`, `--s2i-animate-loop <int>` (GIF), `--s2i-animate-audio` / `--s2i-animate-no-audio`
   (mp4 mux, ffmpeg required; defaults to on for mp4/both).

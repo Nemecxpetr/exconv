@@ -162,6 +162,9 @@ Use the included samples for a quick spin:
 - Batch video: `exconv video-folderbatch my_project --jobs 2 --suffix _biconv --serial-mode parallel`
 - Animate frames: `exconv animate samples/output/sound2image/my_project/animations out.mp4 --fps 12`
 
+Optional upscaling: add `--upscale <factor>` with `--upscale-method` in
+`exconv video-biconv` and `exconv video-folderbatch` (opencv-* needs a model).
+
 The package exposes the main CLI in `exconv.cli.exconv_cli`, registered
 as the `exconv` command. Video-related commands are subcommands here (there
 is no separate `exconv-video` entry point).
@@ -209,6 +212,10 @@ Kernel syntax examples:
 `exconv img-auto` uses `image_auto_convolve` for pure auto-conv and
 `image_pair_convolve` plus a parsed Gaussian kernel when `--kernel` is given.
 
+Optional upscaling: add `--upscale <factor>` with `--upscale-method`
+(e.g. `lanczos`, `bicubic`, or `opencv-*`). OpenCV methods require
+`--upscale-model` (opencv-contrib-python ships with exconv).
+
 ---
 
 ### 3. Sound → image spectral sculpting
@@ -216,6 +223,10 @@ Kernel syntax examples:
 ```bash
 exconv sound2image   --img    img.png   --audio  audio.wav   --out    sculpted.png   --colorspace luma
 ```
+
+Optional upscaling: add `--upscale <factor>` with `--upscale-method`
+(e.g. `lanczos`, `bicubic`, or `opencv-*`). OpenCV methods require
+`--upscale-model` (opencv-contrib-python ships with exconv).
 
 Additional options (subject to change while the experiment evolves):
 

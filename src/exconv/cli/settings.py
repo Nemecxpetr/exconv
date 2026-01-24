@@ -20,14 +20,33 @@ def add_settings_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Save current option values to a settings file (json or csv).",
     )
+    parser.add_argument(
+        "--update-settings",
+        dest="update_settings",
+        action="store_true",
+        default=False,
+        help=(
+            "Update an existing settings file in-place with the provided option "
+            "values and exit (requires --save-settings)."
+        ),
+    )
+    parser.add_argument(
+        "--show-settings",
+        dest="show_settings",
+        action="store_true",
+        default=False,
+        help="Print resolved option settings as JSON and exit.",
+    )
 
 
 def strip_settings_args(
     argv: Iterable[str],
-) -> tuple[list[str], str | None, str | None]:
+) -> tuple[list[str], str | None, str | None, bool, bool]:
     cleaned: list[str] = []
     settings_path: str | None = None
     save_path: str | None = None
+    update_settings = False
+    show_settings = False
 
     it = list(argv)
     i = 0
@@ -53,11 +72,29 @@ def strip_settings_args(
             save_path = arg.split("=", 1)[1]
             i += 1
             continue
+        if arg == "--update-settings":
+            update_settings = True
+            i += 1
+            continue
+        if arg.startswith("--update-settings="):
+            value = arg.split("=", 1)[1].strip().lower()
+            update_settings = value not in {"", "0", "false", "no", "off"}
+            i += 1
+            continue
+        if arg == "--show-settings":
+            show_settings = True
+            i += 1
+            continue
+        if arg.startswith("--show-settings="):
+            value = arg.split("=", 1)[1].strip().lower()
+            show_settings = value not in {"", "0", "false", "no", "off"}
+            i += 1
+            continue
 
         cleaned.append(arg)
         i += 1
 
-    return cleaned, settings_path, save_path
+    return cleaned, settings_path, save_path, update_settings, show_settings
 
 
 def detect_command(argv: Iterable[str]) -> str | None:
@@ -242,3 +279,52 @@ def find_subparser(
         if isinstance(action, argparse._SubParsersAction):
             return action.choices.get(command)
     return None
+
+
+def _relax_parser_for_update(parser: argparse.ArgumentParser) -> None:
+    if parser._defaults:
+        parser.set_defaults(
+            **{key: argparse.SUPPRESS for key in parser._defaults}
+        )
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for subparser in action.choices.values():
+                _relax_parser_for_update(subparser)
+            continue
+        if action.option_strings:
+            action.default = argparse.SUPPRESS
+            if hasattr(action, "required"):
+                action.required = False
+            continue
+        if action.nargs is None or action.nargs == 1:
+            action.nargs = "?"
+        elif action.nargs == "+":
+            action.nargs = "*"
+        action.default = argparse.SUPPRESS
+
+
+def parse_explicit_args(
+    parser: argparse.ArgumentParser,
+    argv: Iterable[str],
+) -> argparse.Namespace:
+    _relax_parser_for_update(parser)
+    return parser.parse_args(list(argv))
+
+
+def serialize_explicit_args(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    *,
+    exclude: set[str] | None = None,
+) -> dict[str, Any]:
+    if exclude is None:
+        exclude = set()
+    option_dests = collect_option_dests(parser)
+    out: dict[str, Any] = {}
+    for dest in option_dests:
+        if dest in exclude:
+            continue
+        if not hasattr(args, dest):
+            continue
+        out[dest] = _coerce_value(getattr(args, dest))
+    return out

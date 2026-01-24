@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +21,9 @@ from exconv.cli.settings import (
     load_settings,
     select_settings,
     apply_settings_to_parser,
+    parse_explicit_args,
     serialize_args,
+    serialize_explicit_args,
     save_settings,
     find_subparser,
 )
@@ -225,6 +228,7 @@ def _cmd_img_auto(args: argparse.Namespace) -> int:
         )
 
     out_u8 = as_uint8(out)
+    out_u8 = _apply_upscale(out_u8, args)
     write_image(out_path, out_u8)
     return 0
 
@@ -249,6 +253,7 @@ def _cmd_sound2image(args: argparse.Namespace) -> int:
     )
 
     out_u8 = as_uint8(out)
+    out_u8 = _apply_upscale(out_u8, args)
     write_image(out_path, out_u8)
     return 0
 
@@ -431,6 +436,23 @@ def _build_parser() -> argparse.ArgumentParser:
             "If omitted, pure auto-convolution is used."
         ),
     )
+    p_img.add_argument(
+        "--upscale",
+        type=float,
+        default=1.0,
+        help="Optional output scale factor (1.0 disables).",
+    )
+    p_img.add_argument(
+        "--upscale-method",
+        choices=UPSCALE_METHODS,
+        default="lanczos",
+        help="Upscale method; opencv-* requires --upscale-model.",
+    )
+    p_img.add_argument(
+        "--upscale-model",
+        default=None,
+        help="Model path for opencv-* upscalers (e.g. .pb).",
+    )
     p_img.set_defaults(func=_cmd_img_auto)
 
     # ---- sound2image ----
@@ -471,6 +493,23 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="normalize",
         action="store_false",
         help="Disable output normalization/clipping to [0,1].",
+    )
+    p_s2i.add_argument(
+        "--upscale",
+        type=float,
+        default=1.0,
+        help="Optional output scale factor (1.0 disables).",
+    )
+    p_s2i.add_argument(
+        "--upscale-method",
+        choices=UPSCALE_METHODS,
+        default="lanczos",
+        help="Upscale method; opencv-* requires --upscale-model.",
+    )
+    p_s2i.add_argument(
+        "--upscale-model",
+        default=None,
+        help="Model path for opencv-* upscalers (e.g. .pb).",
     )
     p_s2i.set_defaults(func=_cmd_sound2image, normalize=True)
 
@@ -544,8 +583,39 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_parser()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
-    cleaned_argv, settings_path, save_path = strip_settings_args(raw_argv)
+    cleaned_argv, settings_path, save_path, update_settings, show_settings = strip_settings_args(raw_argv)
     command = detect_command(cleaned_argv)
+
+    if update_settings:
+        if not save_path:
+            raise SystemExit("--update-settings requires --save-settings <path>.")
+        if command is None:
+            raise SystemExit("--update-settings requires a command.")
+        target = find_subparser(parser, command) or parser
+        args = parse_explicit_args(parser, cleaned_argv)
+        exclude = {
+            "settings_path",
+            "save_settings_path",
+            "update_settings",
+            "show_settings",
+            "command",
+            "func",
+        }
+        patch = serialize_explicit_args(args, target, exclude=exclude)
+        if not patch:
+            raise SystemExit("--update-settings requires at least one option to update.")
+        save_path_obj = Path(save_path)
+        base: dict[str, object] = {}
+        if save_path_obj.exists():
+            data = load_settings(save_path_obj)
+            base = select_settings(data, command)
+        merged = dict(base)
+        merged.update(patch)
+        save_settings(save_path_obj, merged, command=command)
+        return 0
+
+    if show_settings and command is None:
+        raise SystemExit("--show-settings requires a command.")
 
     if settings_path:
         settings_data = load_settings(Path(settings_path))
@@ -555,12 +625,23 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     args = parser.parse_args(cleaned_argv)
 
-    if save_path:
+    if save_path or show_settings:
         cmd = getattr(args, "command", command)
         target = find_subparser(parser, cmd) or parser
-        exclude = {"settings_path", "save_settings_path", "command", "func"}
+        exclude = {
+            "settings_path",
+            "save_settings_path",
+            "update_settings",
+            "show_settings",
+            "command",
+            "func",
+        }
         settings_out = serialize_args(args, target, exclude=exclude)
-        save_settings(Path(save_path), settings_out, command=cmd)
+        if save_path:
+            save_settings(Path(save_path), settings_out, command=cmd)
+        if show_settings:
+            print(json.dumps(settings_out, indent=2, sort_keys=True, ensure_ascii=True))
+            return 0
 
     return args.func(args)
 

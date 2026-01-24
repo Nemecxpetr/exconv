@@ -29,6 +29,7 @@ from .image import (
     as_uint8,
     rgb_to_luma,
     luma_to_rgb,
+    upscale_image,
 )
 
 from .io_video import (
@@ -50,6 +51,7 @@ __all__ = [
     "as_uint8",
     "rgb_to_luma",
     "luma_to_rgb",
+    "upscale_image",
     # video
     "read_video_frames",
     "write_video_frames",

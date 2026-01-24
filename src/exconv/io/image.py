@@ -20,7 +20,30 @@ __all__ = [
     "as_uint8",
     "rgb_to_luma",
     "luma_to_rgb",
+    "upscale_image",
+    "UPSCALE_METHODS",
 ]
+
+
+_PIL_RESAMPLE_METHODS = {
+    "nearest": Image.Resampling.NEAREST,
+    "box": Image.Resampling.BOX,
+    "bilinear": Image.Resampling.BILINEAR,
+    "hamming": Image.Resampling.HAMMING,
+    "bicubic": Image.Resampling.BICUBIC,
+    "lanczos": Image.Resampling.LANCZOS,
+}
+
+_OPENCV_SUPERRES_METHODS = {
+    "opencv-espcn": "espcn",
+    "opencv-fsrcnn": "fsrcnn",
+    "opencv-lapsrn": "lapsrn",
+    "opencv-edsr": "edsr",
+}
+
+UPSCALE_METHODS = tuple(list(_PIL_RESAMPLE_METHODS) + list(_OPENCV_SUPERRES_METHODS))
+
+_SUPERRES_CACHE: dict[tuple[str, str, int], object] = {}
 
 
 def _pathify(path: PathLike) -> str:
@@ -214,6 +237,165 @@ def luma_to_rgb(x: ArrayLike, *, dtype: Optional[Union[np.dtype, str]] = None) -
     if dtype is not None:
         rgb = rgb.astype(dtype, copy=False)
     return rgb
+
+
+def _parse_upscale_method(method: str) -> tuple[str, str]:
+    name = method.strip().lower()
+    if name in _PIL_RESAMPLE_METHODS:
+        return "pillow", name
+    if name in _OPENCV_SUPERRES_METHODS:
+        return "opencv", _OPENCV_SUPERRES_METHODS[name]
+    if name.startswith("opencv:") or name.startswith("opencv-"):
+        algo = name.split(":", 1)[1] if ":" in name else name.split("-", 1)[1]
+        if algo in _OPENCV_SUPERRES_METHODS.values():
+            return "opencv", algo
+    raise ValueError(f"Unknown upscale method {method!r}. Use one of: {UPSCALE_METHODS}")
+
+
+def _validate_scale(scale: float) -> float:
+    try:
+        scale_f = float(scale)
+    except (TypeError, ValueError):
+        raise ValueError(f"scale must be a number, got {scale!r}") from None
+    if scale_f <= 0:
+        raise ValueError(f"scale must be > 0, got {scale_f!r}")
+    return scale_f
+
+
+def _resize_pillow(img_u8: np.ndarray, scale: float, method: str) -> np.ndarray:
+    if scale == 1.0:
+        return img_u8
+    h, w = img_u8.shape[:2]
+    new_w = int(round(w * scale))
+    new_h = int(round(h * scale))
+    if new_w < 1 or new_h < 1:
+        raise ValueError(f"scale {scale!r} produces invalid size {(new_h, new_w)}")
+    resample = _PIL_RESAMPLE_METHODS[method]
+    pil_img = Image.fromarray(img_u8)
+    out = pil_img.resize((new_w, new_h), resample=resample)
+    return np.asarray(out, dtype=np.uint8)
+
+
+def _resize_opencv_superres(
+    img_u8: np.ndarray,
+    *,
+    scale: float,
+    model: PathLike,
+    algo: str,
+) -> np.ndarray:
+    scale_f = _validate_scale(scale)
+    if scale_f <= 1.0:
+        raise ValueError("OpenCV super-res requires scale > 1.")
+    if abs(scale_f - int(scale_f)) > 1e-6:
+        raise ValueError("OpenCV super-res scale must be an integer (e.g., 2, 3, 4).")
+    scale_i = int(scale_f)
+
+    if model is None:
+        raise ValueError("OpenCV super-res requires --upscale-model.")
+
+    try:
+        import cv2
+    except ImportError as exc:
+        raise ImportError("OpenCV super-res requires opencv-contrib-python.") from exc
+
+    if not hasattr(cv2, "dnn_superres"):
+        raise ImportError("OpenCV build lacks dnn_superres; install opencv-contrib-python.")
+
+    model_path = Path(model)
+    if not model_path.exists():
+        raise ValueError(f"OpenCV super-res model not found: {model_path}")
+
+    algo = algo.lower()
+    inferred_algo = _infer_superres_algo_from_model(model_path)
+    if inferred_algo is not None and inferred_algo != algo:
+        raise ValueError(
+            "OpenCV super-res model does not match the selected algorithm. "
+            f"Model {model_path.name!r} looks like {inferred_algo!r}, "
+            f"but --upscale-method requested {algo!r}. "
+            "Use a matching method (e.g. opencv-edsr for EDSR_x2.pb)."
+        )
+
+    cache_key = (str(model_path), algo, scale_i)
+    sr = _SUPERRES_CACHE.get(cache_key)
+    if sr is None:
+        sr = cv2.dnn_superres.DnnSuperResImpl_create()
+        sr.readModel(str(model_path))
+        sr.setModel(algo, scale_i)
+        _SUPERRES_CACHE[cache_key] = sr
+
+    alpha = None
+    if img_u8.ndim == 2:
+        bgr = cv2.cvtColor(img_u8, cv2.COLOR_GRAY2BGR)
+        mode = "gray"
+    elif img_u8.ndim == 3 and img_u8.shape[2] == 1:
+        bgr = cv2.cvtColor(img_u8[..., 0], cv2.COLOR_GRAY2BGR)
+        mode = "gray"
+    elif img_u8.ndim == 3 and img_u8.shape[2] == 3:
+        bgr = cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR)
+        mode = "rgb"
+    elif img_u8.ndim == 3 and img_u8.shape[2] == 4:
+        alpha = img_u8[..., 3]
+        bgr = cv2.cvtColor(img_u8[..., :3], cv2.COLOR_RGB2BGR)
+        mode = "rgba"
+    else:
+        raise ValueError(f"Expected 2D or 3D image with 1,3,4 channels, got {img_u8.shape}")
+
+    out_bgr = sr.upsample(bgr)
+    out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+
+    if mode == "gray":
+        return cv2.cvtColor(out_rgb, cv2.COLOR_RGB2GRAY)
+    if mode == "rgba":
+        out_h, out_w = out_rgb.shape[:2]
+        alpha_up = cv2.resize(alpha, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+        return np.dstack([out_rgb, alpha_up])
+    return out_rgb
+
+
+def _infer_superres_algo_from_model(model_path: Path) -> Optional[str]:
+    name = model_path.stem.lower()
+    for algo in ("edsr", "espcn", "fsrcnn", "lapsrn"):
+        if algo in name:
+            return algo
+    return None
+
+
+def upscale_image(
+    x: ArrayLike,
+    *,
+    scale: float = 1.0,
+    method: str = "lanczos",
+    model: Optional[PathLike] = None,
+) -> np.ndarray:
+    """
+    Resize/upscale an image using classic resampling or optional ML backends.
+
+    Parameters
+    ----------
+    x : ndarray
+        2D or 3D image array.
+    scale : float, default=1.0
+        Uniform scale factor. Values > 1 upscale; values < 1 downscale.
+    method : str, default="lanczos"
+        Resampling or backend method. Supported:
+        - classic: nearest, box, bilinear, hamming, bicubic, lanczos
+        - ML: opencv-espcn, opencv-fsrcnn, opencv-lapsrn, opencv-edsr
+    model : str or Path, optional
+        Path to the model file required by OpenCV super-res backends.
+
+    Returns
+    -------
+    ndarray
+        Upscaled image as uint8 (same shape if scale=1 and Pillow backend).
+    """
+    backend, method_key = _parse_upscale_method(method)
+    if backend == "opencv":
+        img_u8 = as_uint8(x)
+        return _resize_opencv_superres(img_u8, scale=scale, model=model, algo=method_key)
+
+    scale_f = _validate_scale(scale)
+    img_u8 = as_uint8(x)
+    return _resize_pillow(img_u8, scale_f, method_key)
 
 
 def write_image(

@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Added optional image upscaling (Pillow resampling, OpenCV DNN super-res) with CLI flags for img-auto, sound2image, and folderbatch.
+- Added optional video frame upscaling in the xmodal video pipeline, exposed via video-biconv and video-folderbatch.
 
 ## 0.2.0 - 2026-01-08
 - Added block-based video bi-conv (`--block-size`) so groups of frames share an audio chunk and the audio is driven by the mean image of each block.

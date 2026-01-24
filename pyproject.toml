@@ -22,6 +22,7 @@ dependencies = [
     "matplotlib>=3.8",
     "click>=8.1",        
     "tqdm>=4.66",
+    "opencv-contrib-python>=4.8",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +32,9 @@ dev = [
     "ruff>=0.3",
     "mypy>=1.8",
     "notebook>=7.0"
+]
+upscale = [
+    "opencv-contrib-python>=4.8"
 ]
 
 [project.urls]

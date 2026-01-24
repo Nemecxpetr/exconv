@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -22,9 +23,12 @@ from exconv.cli.settings import (
     load_settings,
     select_settings,
     apply_settings_to_parser,
+    parse_explicit_args,
     serialize_args,
+    serialize_explicit_args,
     save_settings,
 )
+from exconv.io.image import UPSCALE_METHODS
 
 VIDEO_EXTS = {
     ".mp4",
@@ -172,6 +176,9 @@ class JobSpec:
     block_adsr_sustain: float
     block_adsr_release_s: float
     block_adsr_curve: str
+    upscale: float
+    upscale_method: str
+    upscale_model: Optional[Path]
     s2i_mode: str
     s2i_colorspace: str
     s2i_safe_color: bool
@@ -245,6 +252,9 @@ def _build_biconv_metadata(spec: JobSpec, *, variant: str) -> dict[str, str]:
         "block_adsr_sustain": spec.block_adsr_sustain,
         "block_adsr_release_s": spec.block_adsr_release_s,
         "block_adsr_curve": spec.block_adsr_curve,
+        "upscale": spec.upscale,
+        "upscale_method": spec.upscale_method,
+        "upscale_model": str(spec.upscale_model) if spec.upscale_model is not None else None,
         "s2i_mode": spec.s2i_mode,
         "s2i_colorspace": spec.s2i_colorspace,
         "s2i_safe_color": spec.s2i_safe_color,
@@ -293,6 +303,9 @@ def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
             block_adsr_sustain=spec.block_adsr_sustain,
             block_adsr_release_s=spec.block_adsr_release_s,
             block_adsr_curve=spec.block_adsr_curve,
+            upscale=spec.upscale,
+            upscale_method=spec.upscale_method,
+            upscale_model=spec.upscale_model,
             s2i_mode=spec.s2i_mode,
             s2i_colorspace=spec.s2i_colorspace,
             i2s_mode=spec.i2s_mode,
@@ -607,6 +620,23 @@ def _add_video_folderbatch_args(parser: argparse.ArgumentParser) -> None:
             "(original audio) and audio-only (original video) variants."
         ),
     )
+    parser.add_argument(
+        "--upscale",
+        type=float,
+        default=1.0,
+        help="Optional output scale factor (1.0 disables).",
+    )
+    parser.add_argument(
+        "--upscale-method",
+        choices=UPSCALE_METHODS,
+        default="lanczos",
+        help="Upscale method; opencv-* requires --upscale-model.",
+    )
+    parser.add_argument(
+        "--upscale-model",
+        default=None,
+        help="Model path for opencv-* upscalers (e.g. .pb).",
+    )
 
 
 def _cmd_video_folderbatch(args: argparse.Namespace) -> int:
@@ -737,6 +767,9 @@ def _cmd_video_folderbatch(args: argparse.Namespace) -> int:
                 block_adsr_sustain=float(args.block_adsr_sustain),
                 block_adsr_release_s=float(args.block_adsr_release_s),
                 block_adsr_curve=str(args.block_adsr_curve),
+                upscale=float(args.upscale),
+                upscale_method=str(args.upscale_method),
+                upscale_model=_path(args.upscale_model) if args.upscale_model else None,
                 s2i_mode=args.s2i_mode,
                 s2i_colorspace=args.s2i_colorspace,
                 s2i_safe_color=bool(args.s2i_safe_color),
@@ -839,16 +872,49 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
-    cleaned_argv, settings_path, save_path = strip_settings_args(raw_argv)
+    cleaned_argv, settings_path, save_path, update_settings, show_settings = strip_settings_args(raw_argv)
+    if update_settings:
+        if not save_path:
+            raise SystemExit("--update-settings requires --save-settings <path>.")
+        args = parse_explicit_args(parser, cleaned_argv)
+        exclude = {
+            "settings_path",
+            "save_settings_path",
+            "update_settings",
+            "show_settings",
+            "func",
+        }
+        patch = serialize_explicit_args(args, parser, exclude=exclude)
+        if not patch:
+            raise SystemExit("--update-settings requires at least one option to update.")
+        save_path_obj = Path(save_path)
+        base: dict[str, object] = {}
+        if save_path_obj.exists():
+            data = load_settings(save_path_obj)
+            base = select_settings(data, "video-folderbatch")
+        merged = dict(base)
+        merged.update(patch)
+        save_settings(save_path_obj, merged, command="video-folderbatch")
+        return 0
     if settings_path:
         settings_data = load_settings(Path(settings_path))
         settings = select_settings(settings_data, "video-folderbatch")
         apply_settings_to_parser(parser, settings)
     args = parser.parse_args(cleaned_argv)
-    if save_path:
-        exclude = {"settings_path", "save_settings_path", "func"}
+    if save_path or show_settings:
+        exclude = {
+            "settings_path",
+            "save_settings_path",
+            "update_settings",
+            "show_settings",
+            "func",
+        }
         settings_out = serialize_args(args, parser, exclude=exclude)
-        save_settings(Path(save_path), settings_out, command="video-folderbatch")
+        if save_path:
+            save_settings(Path(save_path), settings_out, command="video-folderbatch")
+        if show_settings:
+            print(json.dumps(settings_out, indent=2, sort_keys=True, ensure_ascii=True))
+            return 0
     return _cmd_video_folderbatch(args)
 
 
