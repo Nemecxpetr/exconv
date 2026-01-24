@@ -9,6 +9,7 @@ from exconv.io.image import (
     as_uint8,
     rgb_to_luma,
     luma_to_rgb,
+    upscale_image,
 )
 
 
@@ -64,3 +65,17 @@ def test_image_roundtrip_small(tmp_path: Path):
     # Basic sanity: values are monotonic in at least one channel
     # (because we wrote a gradient)
     assert y[..., 0].min() <= y[..., 0].max()
+
+
+def test_upscale_nearest_grayscale():
+    img = np.array([[0, 255], [128, 64]], dtype=np.uint8)
+    out = upscale_image(img, scale=2.0, method="nearest")
+    expected = np.repeat(np.repeat(img, 2, axis=0), 2, axis=1)
+    assert out.shape == (4, 4)
+    np.testing.assert_array_equal(out, expected)
+
+
+def test_upscale_bicubic_rgb_shape():
+    img = np.zeros((4, 6, 3), dtype=np.uint8)
+    out = upscale_image(img, scale=1.5, method="bicubic")
+    assert out.shape == (6, 9, 3)
