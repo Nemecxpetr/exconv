@@ -884,7 +884,7 @@ out = image_auto_convolve(
 
     colorspace: Literal["luma","channels"] = "luma",
 
-    normalize: str = "clip",        # "clip","rescale"
+    normalize: str = "clip",        # "none","clip","rescale"
 
     gamma=None,
 
@@ -916,7 +916,7 @@ out = image_pair_convolve(
 
     colorspace: Literal["luma","channels"] = "luma",
 
-    normalize: str = "clip",        # "clip","rescale"
+    normalize: str = "clip",        # "none","clip","rescale"
 
     gamma=None,
 
@@ -931,6 +931,8 @@ out = image_pair_convolve(
 - `kernel`: 2D or 3D (optional per-channel kernels).
 
 - `normalize`:
+
+  - `"none"`: return the raw float result.
 
   - `"clip"`: clip to inputs numeric range.
 
@@ -1232,11 +1234,12 @@ See `docs/design.md` section 6.3 for image->sound details and section 6.4 for bl
 ### 7.6 `folderbatch`
 
 ```bash
-exconv folderbatch my_project --root samples --audio-mode same-center --audio-order 2 --audio-normalize rms --audio-multi-circular
+exconv folderbatch my_project --root samples --audio-mode same-center --audio-order 2 --audio-normalize rms
 ```
 
-Batch audio self, pair and all-input N-fold convolution plus optional
-sound->image outputs across a project folder. See `docs/scripts.md` for the
+Batch audio self/pair convolution plus optional sound->image outputs across a
+project folder. The all-input N-fold output is explicit opt-in via
+`--audio-multi` or `--audio-multi-circular`. See `docs/scripts.md` for the
 complete grouped flag list and the expected `samples/` folder layout.
 
 Audio outputs:
@@ -1245,7 +1248,7 @@ Audio outputs:
 |---------------|----------|
 | `output/audio/<project>/self/` | One self-convolution per input. |
 | `output/audio/<project>/pair/` | One output per unordered input pair. |
-| `output/audio/<project>/multi/` | One all-files N-fold convolution. |
+| `output/audio/<project>/multi/` | One all-files N-fold convolution, only when explicitly requested. |
 
 Audio options:
 
@@ -1254,7 +1257,8 @@ Audio options:
 | `--audio-mode` | Linear convolution size policy: `full`, `same-first`, `same-center`. |
 | `--audio-order` | Self-convolution order. |
 | `--audio-circular` | Use circular convolution for all audio outputs. |
-| `--audio-multi-circular` | Use circular convolution only for the all-files N-fold output. |
+| `--audio-multi` | Also write one all-files N-fold convolution. |
+| `--audio-multi-circular` | Enable the all-files N-fold output and use circular convolution for it. |
 | `--audio-normalize` | `rms`, `peak`, or `none`. |
 | `--audio-subtype` | libsndfile subtype for WAV/FLAC outputs. |
 

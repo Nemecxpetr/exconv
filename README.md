@@ -158,7 +158,7 @@ Use the included samples for a quick spin:
 - Sound→image: `exconv sound2image --img samples/input/img/glitch_bean.png --audio samples/input/audio/original.wav --out samples/output/img/glitch_sculpt.png --colorspace luma`
 - Image→sound: `python scripts/image2sound_demo.py --audio samples/input/test_assets/audio_long_sines.wav --image samples/input/test_assets/img_checker.png --mode radial --impulse-len auto --phase-mode spiral --out-dir samples/output/audio/img2sound_demo`
 - Bi-conv video: `exconv video-biconv --video samples/input/video/test_01.mp4 --out-video samples/output/video/test_01_biconv.mp4 --out-audio samples/output/audio/test_01_biconv.wav --serial-mode parallel --audio-length-mode pad-zero --i2s-phase-mode spiral --i2s-impulse-len auto`
-- Batch audio + sound2image: `exconv folderbatch my_project --root samples --audio-mode same-center --audio-order 2 --audio-normalize rms --audio-multi-circular`
+- Batch audio + sound2image: `exconv folderbatch my_project --root samples --audio-mode same-center --audio-order 2 --audio-normalize rms`
 - Batch video: `exconv video-folderbatch my_project --jobs 2 --suffix _biconv --serial-mode parallel`
 - Animate frames: `exconv animate samples/output/sound2image/my_project/animations out.mp4 --fps 12`
 
@@ -211,6 +211,21 @@ Kernel syntax examples:
 
 `exconv img-auto` uses `image_auto_convolve` for pure auto-conv and
 `image_pair_convolve` plus a parsed Gaussian kernel when `--kernel` is given.
+
+Options:
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `--in` | path | Input image. |
+| `--out` | path | Output image. |
+| `--mode` | `full`, `same-first`, `same-center` | Linear size policy. |
+| `--circular` | flag | Use circular convolution. |
+| `--colorspace` | `channels`, `luma` | Per-channel or luminance processing. |
+| `--normalize` | `clip`, `rescale`, `none` | Output normalization. |
+| `--kernel` | Gaussian spec | Optional generated Gaussian kernel. |
+| `--upscale` | float | Output scale factor; `1.0` disables. |
+| `--upscale-method` | see `exconv --help` | Pillow or OpenCV upscaler. |
+| `--upscale-model` | path | `.pb` model for OpenCV super-resolution methods. |
 
 Optional upscaling: add `--upscale <factor>` with `--upscale-method`
 (e.g. `lanczos`, `bicubic`, or `opencv-*`). OpenCV methods require
@@ -375,13 +390,13 @@ exconv folderbatch mlejn \
   --root samples \
   --audio-mode same-center \
   --audio-order 2 \
-  --audio-normalize rms \
-  --audio-multi-circular
+  --audio-normalize rms
 ```
 
 Inputs are read from `<root>/input/audio/<project>/` and, if present,
-`<root>/input/img/<project>/`. Audio outputs are written to
-`<root>/output/audio/<project>/{self,pair,multi}/`.
+`<root>/input/img/<project>/`. Normal audio batch outputs are written to
+`<root>/output/audio/<project>/{self,pair}/`. The `multi/` output is created
+only when explicitly requested.
 
 Audio options:
 
@@ -390,7 +405,8 @@ Audio options:
 | `--audio-mode` | `full`, `same-first`, `same-center` | Linear size policy for self, pair and linear multi convolution. |
 | `--audio-order` | integer >= 1 | Self-convolution order. |
 | `--audio-circular` | flag | Use circular convolution for all audio outputs. |
-| `--audio-multi-circular` | flag | Use circular convolution only for the all-files N-fold output; useful for long recordings. |
+| `--audio-multi` | flag | Also write one all-files N-fold convolution into `multi/`. |
+| `--audio-multi-circular` | flag | Enable the all-files N-fold output and use circular convolution for it; useful for long recordings. |
 | `--audio-normalize` | `rms`, `peak`, `none` | Output normalization. |
 | `--audio-subtype` | e.g. `PCM_16`, `PCM_24`, `FLOAT` | libsndfile output subtype. |
 

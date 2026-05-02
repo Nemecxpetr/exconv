@@ -180,16 +180,17 @@ Note: `scripts/_video_folderbatch.py` still exists as a legacy wrapper; use
 `exconv video-folderbatch` for the supported interface.
 
 ### `exconv folderbatch` - audio + sound2image batches
-- Purpose: batch self, pair and all-files N-fold audio convolution and optional sound->image sculpting.
+- Purpose: batch self/pair audio convolution and optional sound->image sculpting. The all-files N-fold output is available as an explicit opt-in.
 - Inputs: `<root>/input/audio/<project>/*` (required),
   `<root>/input/img/<project>/*` (optional, enables sound->image).
-- Outputs: `<root>/output/audio/<project>/{self,pair,multi}/` and
-  `<root>/output/sound2image/<project>/`.
+- Outputs: `<root>/output/audio/<project>/{self,pair}/` and
+  `<root>/output/sound2image/<project>/`. With `--audio-multi` or
+  `--audio-multi-circular`, also writes `<root>/output/audio/<project>/multi/`.
 - Quick start:
   ```bash
   exconv folderbatch my_project \
     --root samples \
-    --audio-mode same-center --audio-order 2 --audio-normalize rms --audio-multi-circular \
+    --audio-mode same-center --audio-order 2 --audio-normalize rms \
     --s2i-mode mono --s2i-colorspace luma
   ```
 
@@ -203,14 +204,15 @@ Note: `scripts/_video_folderbatch.py` still exists as a legacy wrapper; use
   | `--audio-mode` | `same-center` | Linear convolution size policy: `full`, `same-first`, `same-center`. |
   | `--audio-order` | `2` | Self-convolution order for files in the `self/` output. |
   | `--audio-circular` | off | Use circular convolution for self, pair and multi outputs. |
-  | `--audio-multi-circular` | off | Use circular convolution only for the all-files N-fold output. This is the practical choice for long projects. |
+  | `--audio-multi` | off | Also write one all-files N-fold convolution into `multi/`. |
+  | `--audio-multi-circular` | off | Enable the all-files N-fold output and use circular convolution for it. This is the practical choice for long projects. |
   | `--audio-normalize` | `rms` | Output normalization: `rms`, `peak`, `none`. |
   | `--audio-subtype` | `PCM_16` | libsndfile subtype, for example `PCM_16`, `PCM_24`, or `FLOAT`. |
 
   Multi-convolution note: linear N-fold convolution can be very large because
-  full length is `sum(lengths) - (N - 1)`. If a linear multi run hits memory
-  limits, the command retries the multi output as circular unless
-  `--audio-multi-circular` was already set.
+  full length is `sum(lengths) - (N - 1)`. It is disabled by default. If an
+  explicitly requested linear multi run hits memory limits, the command retries
+  the multi output as circular unless `--audio-multi-circular` was already set.
 
   | Sound->image | Default | What it does |
   | --- | --- | --- |

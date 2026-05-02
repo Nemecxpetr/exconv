@@ -237,9 +237,10 @@ len(full) = sum(input_lengths) - (N - 1)
 ```
 
 For long recordings, this can exceed memory before the result is cropped. The
-batch command therefore exposes `--audio-multi-circular`, which keeps the
-all-files output at the first file length while leaving self and pair outputs
-linear.
+batch command keeps multi-convolution disabled by default. Use `--audio-multi`
+to request the linear all-files output, or `--audio-multi-circular` to request
+a circular all-files output at the first file length while leaving self and
+pair outputs linear.
 
 
 
