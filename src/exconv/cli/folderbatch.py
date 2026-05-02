@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from itertools import combinations
@@ -25,6 +26,7 @@ from exconv.conv1d import (
     Audio,
     auto_convolve as audio_auto_convolve,
     pair_convolve as audio_pair_convolve,
+    multi_convolve as audio_multi_convolve,
 )
 from exconv.xmodal.sound2image import spectral_sculpt
 from exconv.cli.settings import (
@@ -56,6 +58,19 @@ def _find_files(root: Path, exts: Tuple[str, ...]) -> List[Path]:
 
 def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
+
+
+def _multi_output_name(stems: List[str], mode_label: str, max_stem_chars: int = 140) -> str:
+    joined = "__MULTI__".join(stems)
+    suffix = f"__{mode_label}.wav"
+    if len(joined) + len(suffix) <= max_stem_chars:
+        return joined + suffix
+
+    digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
+    first = stems[0] if stems else "audio"
+    prefix_budget = max(16, max_stem_chars - len(suffix) - 32)
+    prefix = first[:prefix_budget].rstrip(" ._-") or "audio"
+    return f"{prefix}__MULTI_{len(stems)}files_{digest}{suffix}"
 
 
 def _ffmpeg_available() -> bool:
@@ -109,14 +124,16 @@ def process_audio_batch(
     audio_dir: Path,
     out_self_dir: Path,
     out_pair_dir: Path,
+    out_multi_dir: Path,
     *,
     mode: str = "same-center",
     order: int = 2,
     circular: bool = False,
+    multi_circular: bool = False,
     normalize: str = "rms",
     subtype: str = "PCM_16",
 ) -> None:
-    """Self + pair convolution for all audio files in audio_dir."""
+    """Self + pair + multi convolution for all audio files in audio_dir."""
     audio_files = _find_files(audio_dir, AUDIO_EXTS)
     if not audio_files:
         print(f"[audio] No audio files found in {audio_dir}")
@@ -125,6 +142,7 @@ def process_audio_batch(
     print(f"[audio] Found {len(audio_files)} files in {audio_dir}")
     _ensure_dir(out_self_dir)
     _ensure_dir(out_pair_dir)
+    _ensure_dir(out_multi_dir)
 
     audio_objs: List[Audio] = []
     for p in audio_files:
@@ -173,6 +191,44 @@ def process_audio_batch(
         out_path = out_pair_dir / out_name
         write_audio(out_path, out.samples, out.sr, subtype=subtype)
         print(f"    pair {p_i.name} - {p_j.name} -> {out_path}")
+
+    print("[audio] Running multi-convolution (all files combined)...")
+    if len(audio_objs) > 1:
+        stems = [p.stem for p in audio_files]
+        multi_mode_label = "circular" if multi_circular else mode
+        try:
+            out = audio_multi_convolve(
+                audio_objs,
+                mode=mode,
+                circular=multi_circular,
+                normalize=normalize,
+            )
+            out_name = _multi_output_name(stems, multi_mode_label)
+            out_path = out_multi_dir / out_name
+            write_audio(out_path, out.samples, out.sr, subtype=subtype)
+            print(f"    multi -> {out_path}")
+        except MemoryError:
+            if multi_circular:
+                print("    [error] multi-convolution ran out of memory")
+                return
+            print("    [warn] linear multi-convolution ran out of memory; retrying circular")
+            try:
+                out = audio_multi_convolve(
+                    audio_objs,
+                    mode=mode,
+                    circular=True,
+                    normalize=normalize,
+                )
+                out_name = _multi_output_name(stems, "circular")
+                out_path = out_multi_dir / out_name
+                write_audio(out_path, out.samples, out.sr, subtype=subtype)
+                print(f"    multi circular -> {out_path}")
+            except Exception as exc:
+                print(f"    [error] circular multi-convolution: {exc}")
+        except Exception as exc:
+            print(f"    [error] multi-convolution: {exc}")
+    else:
+        print("    [skip] multi-convolution requires at least 2 files")
 
 
 def process_sound2image_batch(
@@ -329,6 +385,14 @@ def _add_folderbatch_args(parser: argparse.ArgumentParser) -> None:
         help="Use circular convolution for audio (length preserved).",
     )
     g_audio.add_argument(
+        "--audio-multi-circular",
+        action="store_true",
+        help=(
+            "Use circular convolution for the all-files multi output only. "
+            "Useful for long projects where full N-fold linear convolution is too large."
+        ),
+    )
+    g_audio.add_argument(
         "--audio-normalize",
         choices=["rms", "peak", "none"],
         default="rms",
@@ -423,6 +487,7 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
 
     out_audio_self = root / "output" / "audio" / project / "self"
     out_audio_pair = root / "output" / "audio" / project / "pair"
+    out_audio_multi = root / "output" / "audio" / project / "multi"
     out_s2i = root / "output" / "sound2image" / project
 
     print(f"[config] root={root}")
@@ -431,6 +496,7 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
     print(f"[config] img_dir={img_dir}")
     print(f"[config] out_audio_self={out_audio_self}")
     print(f"[config] out_audio_pair={out_audio_pair}")
+    print(f"[config] out_audio_multi={out_audio_multi}")
     print(f"[config] out_sound2image={out_s2i}")
 
     if audio_dir.exists():
@@ -438,9 +504,11 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
             audio_dir,
             out_audio_self,
             out_audio_pair,
+            out_audio_multi,
             mode=args.audio_mode,
             order=args.audio_order,
             circular=args.audio_circular,
+            multi_circular=args.audio_multi_circular or args.audio_circular,
             normalize=args.audio_normalize,
             subtype=args.audio_subtype,
         )
@@ -543,6 +611,8 @@ def main(argv: list[str] | None = None) -> int:
         settings_data = load_settings(Path(settings_path))
         settings = select_settings(settings_data, "folderbatch")
         apply_settings_to_parser(parser, settings)
+        if "project" in settings:
+            cleaned_argv.append(str(settings["project"]))
     args = parser.parse_args(cleaned_argv)
     if save_path or show_settings:
         exclude = {
