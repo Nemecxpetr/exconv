@@ -1116,6 +1116,7 @@ def biconv_video_from_files(
     video_path: str | Path,
     audio_path: Optional[str | Path] = None,
     *,
+    preview_seconds: float | None = None,
     fps: float | None = None,
     fps_policy: FPSPolicy = "auto",
     s2i_mode: Mode = "mono",
@@ -1195,6 +1196,14 @@ def biconv_video_from_files(
         fps_policy=fps_policy,
         n_frames=len(frames),
     )
+    if preview_seconds is not None:
+        if preview_seconds <= 0:
+            raise ValueError("preview_seconds must be > 0")
+        max_frames = int(max(1, math.ceil(preview_seconds * fps_used)))
+        max_samples = int(max(1, math.ceil(preview_seconds * sr)))
+        frames = frames[:max_frames]
+        if audio.shape[0] > max_samples:
+            audio = audio[:max_samples, :]
 
     # derive block size from divisor if requested
     if block_strategy == "fixed" and block_size_div is not None:
@@ -1323,6 +1332,7 @@ def biconv_video_from_files(
             "i2s_out_norm": i2s_out_norm,
             "i2s_n_bins": i2s_n_bins,
             "audio_source": audio_source,
+            "preview_seconds": preview_seconds,
         }
         metadata_tags = _build_biconv_metadata(metadata_settings, variant="biconv")
         cmd = [
@@ -1368,6 +1378,7 @@ def biconv_video_to_files_stream(
     video_path: str | Path,
     audio_path: Optional[str | Path] = None,
     *,
+    preview_seconds: float | None = None,
     fps: float | None = None,
     fps_policy: FPSPolicy = "auto",
     s2i_mode: Mode = "mono",
@@ -1432,6 +1443,8 @@ def biconv_video_to_files_stream(
         raise ValueError("block_size must be positive")
     if block_crossover_frames < 0:
         raise ValueError("block_crossover_frames must be >= 0")
+    if preview_seconds is not None and preview_seconds <= 0:
+        raise ValueError("preview_seconds must be > 0")
 
     video_path = _as_path(video_path)
     audio_used: Path | None = _as_path(audio_path) if audio_path else None
@@ -1450,6 +1463,11 @@ def biconv_video_to_files_stream(
     audio = np.asarray(audio, dtype=np.float32)
     if audio.ndim == 1:
         audio = audio[:, None]
+    max_samples: int | None = None
+    if preview_seconds is not None:
+        max_samples = int(max(1, math.ceil(preview_seconds * sr)))
+        if audio.shape[0] > max_samples:
+            audio = audio[:max_samples, :]
 
     # --- video metadata (fps/duration) ---
     meta = _read_video_meta(video_path)
@@ -1470,6 +1488,13 @@ def biconv_video_to_files_stream(
 
     # Best-effort estimate (used for progress/center-zero; never used to trim audio)
     n_frames_est: int | None = _estimate_total_frames_from_meta(meta, fps_used)
+    max_frames: int | None = None
+    if preview_seconds is not None:
+        max_frames = int(max(1, math.ceil(preview_seconds * fps_used)))
+        if n_frames_est is None or n_frames_est <= 0:
+            n_frames_est = max_frames
+        else:
+            n_frames_est = min(n_frames_est, max_frames)
 
     # --- derive block size from divisor if requested ---
     if block_strategy == "fixed" and block_size_div is not None:
@@ -1568,28 +1593,31 @@ def biconv_video_to_files_stream(
     # center-zero requires a target duration (best-effort from metadata)
     center_target_len: int | None = None
     if audio_length_mode == "center-zero":
-        dur = meta.get("duration", None)
-        try:
-            dur_f = float(dur)
-        except (TypeError, ValueError):
-            dur_f = 0.0
-        if dur_f > 0:
-            center_target_len = int(max(1, round(dur_f * sr)))
-        elif n_frames_est is not None and n_frames_est > 0:
-            center_target_len = int(max(1, round(n_frames_est * sr / fps_used)))
+        if max_samples is not None:
+            center_target_len = int(max_samples)
         else:
-            # Last resort: count frames to get a target duration.
+            dur = meta.get("duration", None)
             try:
-                import imageio.v3 as iio  # local import
-
-                n_frames_est = sum(1 for _ in iio.imiter(video_path))
-            except Exception:
-                n_frames_est = None
-
-            if n_frames_est is not None and n_frames_est > 0:
+                dur_f = float(dur)
+            except (TypeError, ValueError):
+                dur_f = 0.0
+            if dur_f > 0:
+                center_target_len = int(max(1, round(dur_f * sr)))
+            elif n_frames_est is not None and n_frames_est > 0:
                 center_target_len = int(max(1, round(n_frames_est * sr / fps_used)))
             else:
-                center_target_len = int(audio.shape[0])
+                # Last resort: count frames to get a target duration.
+                try:
+                    import imageio.v3 as iio  # local import
+
+                    n_frames_est = sum(1 for _ in iio.imiter(video_path))
+                except Exception:
+                    n_frames_est = None
+
+                if n_frames_est is not None and n_frames_est > 0:
+                    center_target_len = int(max(1, round(n_frames_est * sr / fps_used)))
+                else:
+                    center_target_len = int(audio.shape[0])
 
     # Progress bar: estimate blocks if we have an estimate
     n_blocks_est: int | None = None
@@ -1635,6 +1663,12 @@ def biconv_video_to_files_stream(
             nonlocal n_frames_written
             if not frames_list:
                 return
+            if max_frames is not None:
+                remaining = max_frames - n_frames_written
+                if remaining <= 0:
+                    return
+                if len(frames_list) > remaining:
+                    frames_list = frames_list[:remaining]
             if video_writer is None:
                 n_frames_written += len(frames_list)
                 return
@@ -1655,6 +1689,12 @@ def biconv_video_to_files_stream(
                 return
             if seg.ndim == 1:
                 seg = seg[:, None]
+            if max_samples is not None:
+                remaining = max_samples - audio_samples_written
+                if remaining <= 0:
+                    return
+                if seg.shape[0] > remaining:
+                    seg = seg[:remaining, :]
             if audio_writer is None:
                 audio_channels_written = int(seg.shape[1])
                 audio_writer = sf.SoundFile(
@@ -1677,6 +1717,8 @@ def biconv_video_to_files_stream(
         block_index = 0
 
         while True:
+            if max_frames is not None and block_start >= max_frames:
+                break
             if block_sizes_iter is not None:
                 try:
                     block_target = int(next(block_sizes_iter))
@@ -1694,6 +1736,15 @@ def biconv_video_to_files_stream(
                     next_overlap = int(block_overlaps[block_index])
             elif block_crossover != "none" and block_crossover_frames > 0:
                 next_overlap = min(int(block_crossover_frames), block_target)
+
+            if max_frames is not None:
+                remaining = max_frames - block_start
+                if remaining <= 0:
+                    break
+                if block_target > remaining:
+                    block_target = remaining
+                if block_target == remaining:
+                    next_overlap = 0
 
             if len(carry_frames) > block_target:
                 carry_frames = carry_frames[-block_target:]
@@ -2016,6 +2067,7 @@ def biconv_video_to_files_stream(
             "i2s_out_norm": i2s_out_norm,
             "i2s_n_bins": i2s_n_bins,
             "audio_source": audio_source,
+            "preview_seconds": preview_seconds,
         }
         metadata_tags = _build_biconv_metadata(metadata_settings, variant="biconv")
         cmd = [
