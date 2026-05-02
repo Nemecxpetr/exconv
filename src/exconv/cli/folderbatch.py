@@ -562,7 +562,7 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
 def register_folderbatch_subcommand(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "folderbatch",
-        help="Batch audio self/pair convolution and optional sound2image.",
+        help="Batch audio self/pair/multi convolution and optional sound2image.",
     )
     _add_folderbatch_args(p)
     p.set_defaults(func=_cmd_folderbatch)
@@ -572,7 +572,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="folderbatch",
         description=(
-            "Batch self/pair audio convolution and optional sound2image "
+            "Batch self/pair/multi audio convolution and optional sound2image "
             "processing for a project folder."
         ),
     )

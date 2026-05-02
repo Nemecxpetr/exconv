@@ -2,7 +2,13 @@
 import numpy as np
 import pytest
 
-from src.exconv.conv1d.audio import Audio, auto_convolve, pair_convolve
+from src.exconv.conv1d.audio import (
+    Audio,
+    auto_convolve,
+    convolution_family,
+    multi_convolve,
+    pair_convolve,
+)
 
 
 def test_impulse_self_convolution_full():
@@ -173,3 +179,122 @@ def test_auto_convolve_order_1_returns_copy_with_optional_norm():
 
     out_rms = auto_convolve(a, mode="full", circular=False, normalize="rms", order=1)
     assert _rms(out_rms.samples) == pytest.approx(0.1, rel=1e-4, abs=1e-6)
+
+
+def test_convolution_family_three_signals_full_matches_numpy():
+    sr = 44100
+    xs = [
+        np.array([1.0, 2.0, -1.0]),
+        np.array([0.5, -0.25]),
+        np.array([2.0, 0.0, 1.0]),
+    ]
+    audios = [Audio(samples=x, sr=sr) for x in xs]
+
+    results = convolution_family(
+        audios,
+        names=["a", "b", "c"],
+        mode="full",
+        normalize=None,
+        self_order=2,
+    )
+
+    assert [r.kind for r in results] == [
+        "self",
+        "self",
+        "self",
+        "pair",
+        "pair",
+        "pair",
+        "multi",
+    ]
+    assert [r.indices for r in results] == [
+        (0,),
+        (1,),
+        (2,),
+        (0, 1),
+        (0, 2),
+        (1, 2),
+        (0, 1, 2),
+    ]
+    assert results[0].names == ("a",)
+    assert results[-1].names == ("a", "b", "c")
+
+    expected = [
+        np.convolve(xs[0], xs[0]),
+        np.convolve(xs[1], xs[1]),
+        np.convolve(xs[2], xs[2]),
+        np.convolve(xs[0], xs[1]),
+        np.convolve(xs[0], xs[2]),
+        np.convolve(xs[1], xs[2]),
+        np.convolve(np.convolve(xs[0], xs[1]), xs[2]),
+    ]
+
+    for result, exp in zip(results, expected):
+        assert result.audio.sr == sr
+        np.testing.assert_allclose(result.audio.samples, exp, rtol=1e-10, atol=1e-10)
+
+
+def test_convolution_family_group_selection_and_validation():
+    audios = [
+        Audio(samples=np.array([1.0, 0.0]), sr=8000),
+        Audio(samples=np.array([0.0, 1.0]), sr=8000),
+        Audio(samples=np.array([1.0, 1.0]), sr=8000),
+    ]
+
+    pairs = convolution_family(
+        audios,
+        mode="same-first",
+        normalize=None,
+        include_self=False,
+        include_multi=False,
+    )
+    assert [r.kind for r in pairs] == ["pair", "pair", "pair"]
+    assert all(r.audio.n_samples == audios[0].n_samples for r in pairs)
+
+    with pytest.raises(ValueError):
+        convolution_family(audios, names=["too", "short"])
+
+    with pytest.raises(ValueError):
+        convolution_family([audios[0], Audio(samples=np.ones(2), sr=16000)])
+
+
+def test_multi_convolve_mismatched_channels_downmix_to_mono():
+    sr = 44100
+    mono = np.array([1.0, 2.0, -1.0])
+    stereo = np.array([[0.5, 1.0], [-0.25, 0.25]])
+    tail = np.array([2.0, 0.0, 1.0])
+
+    out = multi_convolve(
+        [
+            Audio(samples=mono, sr=sr),
+            Audio(samples=stereo, sr=sr),
+            Audio(samples=tail, sr=sr),
+        ],
+        mode="full",
+        normalize=None,
+    )
+
+    expected = np.convolve(np.convolve(mono, stereo.mean(axis=1)), tail)
+    assert out.is_mono
+    np.testing.assert_allclose(out.samples, expected, rtol=1e-10, atol=1e-10)
+
+
+def test_multi_convolve_circular_matches_direct_frequency_product():
+    sr = 44100
+    xs = [
+        np.array([1.0, 2.0, -1.0, 0.5]),
+        np.array([0.5, -0.25]),
+        np.array([2.0, 0.0, 1.0]),
+    ]
+    audios = [Audio(samples=x, sr=sr) for x in xs]
+
+    out = multi_convolve(audios, circular=True, normalize=None)
+
+    fft_len = xs[0].size
+    expected_fft = np.fft.rfft(xs[0], n=fft_len)
+    for x in xs[1:]:
+        expected_fft *= np.fft.rfft(x, n=fft_len)
+    expected = np.fft.irfft(expected_fft, n=fft_len)
+
+    assert out.n_samples == fft_len
+    np.testing.assert_allclose(out.samples, expected, rtol=1e-10, atol=1e-10)

@@ -326,7 +326,7 @@ def _cmd_animate(args: argparse.Namespace) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="exconv",
-        description="Minimal CLI for exconv demos (audio, image, and sound→image).",
+        description="Minimal CLI for exconv demos (audio, image, and sound->image).",
     )
     add_settings_args(parser)
     parser.add_argument(
