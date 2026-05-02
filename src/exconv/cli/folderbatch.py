@@ -129,11 +129,12 @@ def process_audio_batch(
     mode: str = "same-center",
     order: int = 2,
     circular: bool = False,
+    include_multi: bool = False,
     multi_circular: bool = False,
     normalize: str = "rms",
     subtype: str = "PCM_16",
 ) -> None:
-    """Self + pair + multi convolution for all audio files in audio_dir."""
+    """Self + pair convolution, plus optional all-files multi convolution."""
     audio_files = _find_files(audio_dir, AUDIO_EXTS)
     if not audio_files:
         print(f"[audio] No audio files found in {audio_dir}")
@@ -142,7 +143,8 @@ def process_audio_batch(
     print(f"[audio] Found {len(audio_files)} files in {audio_dir}")
     _ensure_dir(out_self_dir)
     _ensure_dir(out_pair_dir)
-    _ensure_dir(out_multi_dir)
+    if include_multi:
+        _ensure_dir(out_multi_dir)
 
     audio_objs: List[Audio] = []
     for p in audio_files:
@@ -191,6 +193,10 @@ def process_audio_batch(
         out_path = out_pair_dir / out_name
         write_audio(out_path, out.samples, out.sr, subtype=subtype)
         print(f"    pair {p_i.name} - {p_j.name} -> {out_path}")
+
+    if not include_multi:
+        print("[audio] Skipping multi-convolution (use --audio-multi to enable).")
+        return
 
     print("[audio] Running multi-convolution (all files combined)...")
     if len(audio_objs) > 1:
@@ -385,10 +391,15 @@ def _add_folderbatch_args(parser: argparse.ArgumentParser) -> None:
         help="Use circular convolution for audio (length preserved).",
     )
     g_audio.add_argument(
+        "--audio-multi",
+        action="store_true",
+        help="Also write one all-files N-fold convolution into the multi output folder.",
+    )
+    g_audio.add_argument(
         "--audio-multi-circular",
         action="store_true",
         help=(
-            "Use circular convolution for the all-files multi output only. "
+            "Enable the all-files multi output and use circular convolution for it. "
             "Useful for long projects where full N-fold linear convolution is too large."
         ),
     )
@@ -496,7 +507,11 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
     print(f"[config] img_dir={img_dir}")
     print(f"[config] out_audio_self={out_audio_self}")
     print(f"[config] out_audio_pair={out_audio_pair}")
-    print(f"[config] out_audio_multi={out_audio_multi}")
+    include_audio_multi = bool(args.audio_multi or args.audio_multi_circular)
+    if include_audio_multi:
+        print(f"[config] out_audio_multi={out_audio_multi}")
+    else:
+        print("[config] out_audio_multi=<disabled; use --audio-multi>")
     print(f"[config] out_sound2image={out_s2i}")
 
     if audio_dir.exists():
@@ -508,6 +523,7 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
             mode=args.audio_mode,
             order=args.audio_order,
             circular=args.audio_circular,
+            include_multi=include_audio_multi,
             multi_circular=args.audio_multi_circular or args.audio_circular,
             normalize=args.audio_normalize,
             subtype=args.audio_subtype,
@@ -562,7 +578,7 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
 def register_folderbatch_subcommand(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "folderbatch",
-        help="Batch audio self/pair/multi convolution and optional sound2image.",
+        help="Batch audio self/pair convolution and optional sound2image.",
     )
     _add_folderbatch_args(p)
     p.set_defaults(func=_cmd_folderbatch)
@@ -572,7 +588,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="folderbatch",
         description=(
-            "Batch self/pair/multi audio convolution and optional sound2image "
+            "Batch self/pair audio convolution and optional sound2image "
             "processing for a project folder."
         ),
     )

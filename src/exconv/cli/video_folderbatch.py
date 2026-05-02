@@ -162,6 +162,7 @@ class JobSpec:
     tmp_audio: Path
     fps: Optional[float]
     fps_policy: str
+    preview_seconds: Optional[float]
     serial_mode: str
     block_size: int
     block_size_div: Optional[int]
@@ -271,6 +272,7 @@ def _build_biconv_metadata(spec: JobSpec, *, variant: str) -> dict[str, str]:
         "i2s_out_norm": spec.i2s_out_norm,
         "i2s_n_bins": spec.i2s_n_bins,
         "audio_source": "video" if spec.audio_path is None else "external",
+        "preview_seconds": spec.preview_seconds,
     }
     return build_exconv_metadata("video-biconv", variant, settings)
 
@@ -285,6 +287,7 @@ def _process_one(spec: JobSpec) -> tuple[bool, str, float]:
             audio_path=spec.audio_path,
             out_video=spec.tmp_video,
             out_audio=spec.tmp_audio,
+            preview_seconds=spec.preview_seconds,
             fps=spec.fps,
             fps_policy=spec.fps_policy,
             mux=False,
@@ -435,6 +438,12 @@ def _add_video_folderbatch_args(parser: argparse.ArgumentParser) -> None:
             "Use 'auto' to apply the recommendation without prompting; "
             "'off' keeps metadata FPS."
         ),
+    )
+    parser.add_argument(
+        "--preview-seconds",
+        type=float,
+        default=None,
+        help="Limit processing to the first N seconds (quick test run).",
     )
 
     parser.add_argument(
@@ -652,6 +661,8 @@ def _cmd_video_folderbatch(args: argparse.Namespace) -> int:
         raise SystemExit("--block-max-frames must be positive")
     if args.beats_per_block <= 0:
         raise SystemExit("--beats-per-block must be positive")
+    if args.preview_seconds is not None and args.preview_seconds <= 0:
+        raise SystemExit("--preview-seconds must be > 0")
     if args.crossover_frames < 0:
         raise SystemExit("--crossover-frames must be >= 0")
     if args.block_adsr_attack_s < 0:
@@ -749,6 +760,7 @@ def _cmd_video_folderbatch(args: argparse.Namespace) -> int:
                 tmp_audio=tmp_audio,
                 fps=fps_override,
                 fps_policy=fps_policy,
+                preview_seconds=args.preview_seconds,
                 serial_mode=args.serial_mode,
                 block_size=block_size,
                 block_size_div=block_size_div,

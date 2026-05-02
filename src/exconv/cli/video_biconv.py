@@ -43,6 +43,7 @@ def run_video_biconv(
     audio_path: Path | None,
     out_video: Path,
     out_audio: Path | None,
+    preview_seconds: float | None,
     fps: float | None,
     fps_policy: str = "auto",
     mux: bool,
@@ -88,6 +89,7 @@ def run_video_biconv(
     n_frames, audio_shape, fps_used, sr = biconv_video_to_files_stream(
         video_path=video_path,
         audio_path=audio_path,
+        preview_seconds=preview_seconds,
         fps=fps,
         fps_policy=fps_policy,
         s2i_mode=s2i_mode,  # type: ignore[arg-type]
@@ -169,6 +171,12 @@ def register_video_biconv_subcommand(subparsers: argparse._SubParsersAction) -> 
         dest="out_audio",
         required=False,
         help="Output audio path (optional if muxing into video).",
+    )
+    p.add_argument(
+        "--preview-seconds",
+        type=float,
+        default=None,
+        help="Limit processing to the first N seconds (quick test run).",
     )
     p.add_argument(
         "--fps",
@@ -423,6 +431,8 @@ def _cmd_video_biconv(args: argparse.Namespace) -> int:
     audio_path = _path(args.audio_path) if args.audio_path else None
     out_video = _path(args.out_video)
     out_audio = _path(args.out_audio) if args.out_audio else None
+    if args.preview_seconds is not None and args.preview_seconds <= 0:
+        raise SystemExit("--preview-seconds must be > 0")
     if args.block_adsr_attack_s < 0:
         raise SystemExit("--block-adsr-attack-s must be >= 0")
     if args.block_adsr_decay_s < 0:
@@ -439,6 +449,7 @@ def _cmd_video_biconv(args: argparse.Namespace) -> int:
         audio_path=audio_path,
         out_video=out_video,
         out_audio=out_audio,
+        preview_seconds=args.preview_seconds,
         fps=args.fps,
         fps_policy=args.fps_policy,
         mux=args.mux,
