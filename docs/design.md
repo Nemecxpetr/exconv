@@ -48,7 +48,7 @@ handling for images, and audioimage spectral mapping.
 
 - **Minimal but composable high-level APIs**  
 
-  - 1D audio: `Audio` + `auto_convolve` / `pair_convolve`.  
+  - 1D audio: `Audio` + `auto_convolve` / `pair_convolve` / `multi_convolve`.  
 
   - 2D images: `image_auto_convolve` / `image_pair_convolve` with color modes.  
 
@@ -126,7 +126,7 @@ h  ----->  FFT  ----  *-mul-*  -----
 
 FFT sizes are chosen per-axis using `_fft_shapes_for_linear`, which in turn
 
-uses `next_fast_len_ge` (SciPys `next_fast_len` if available, otherwise
+uses `next_fast_len_ge` (SciPy's `next_fast_len` if available, otherwise
 
 NumPy or power-of-two fallback).
 
@@ -145,7 +145,7 @@ Given `x` and `h` on some axes:
 
 
 
-- `same-first`  first `len(x)` samples/pixels (like NumPys `"same"` but
+- `same-first`  first `len(x)` samples/pixels (like NumPy's `"same"` but
 
   explicit that the reference is the *first* argument).
 
@@ -215,6 +215,34 @@ All high-level APIs expose a `circular: bool` flag:
 
 
 
+### 3.3 N-fold 1D audio convolution
+
+`multi_convolve([a, b, c, ...])` computes one N-fold 1D convolution:
+
+```txt
+y = a * b * c * ...
+FFT(y) = FFT(a) · FFT(b) · FFT(c) · ...
+```
+
+This is not an N-dimensional convolution in the usual tensor/grid sense. It is
+a convolution of N separate 1D signals, with a 1D output. The operation is
+commutative before cropping, so input order does not change the full linear
+result. Order can still affect practical output policies because `same-*` and
+circular modes use the first input length as the reference.
+
+Linear N-fold length grows quickly:
+
+```txt
+len(full) = sum(input_lengths) - (N - 1)
+```
+
+For long recordings, this can exceed memory before the result is cropped. The
+batch command therefore exposes `--audio-multi-circular`, which keeps the
+all-files output at the first file length while leaving self and pair outputs
+linear.
+
+
+
 ---
 
 
@@ -243,7 +271,7 @@ Two layers handle padding:
 
 
 
-High-level modules (audio/image) usually **dont expose this** directly; they
+High-level modules (audio/image) usually **do not expose this** directly; they
 
 instead offer the `mode` and `circular` knobs. For more exotic pipelines
 
@@ -297,7 +325,7 @@ Color handling is split into:
 
 
 
-We intentionally *dont* assume any particular float range in conv code: it
+We intentionally *do not* assume any particular float range in conv code: it
 
 just uses whatever range the caller chooses (often 0..1 for images). IO
 
@@ -806,7 +834,13 @@ to the high-level APIs:
 
   kernels parsed from strings.
 
-- `sound2image`  `xmodal.sound2image.spectral_sculpt` (soundimage demo).
+- `sound2image`  `xmodal.sound2image.spectral_sculpt` (sound->image demo).
+
+- `folderbatch`  project-wide audio self/pair/N-fold convolution and optional
+  sound->image rendering.
+
+- `video-biconv` / `video-folderbatch`  block-based sound->image and
+  image->sound video workflows.
 
 
 
@@ -818,7 +852,7 @@ The design intention is:
 
   library API.
 
-- Once they stabilize, a small CLI faade can be added for quick runs and
+- Once they stabilize, a small CLI facade can be added for quick runs and
 
   batch experiments.
 

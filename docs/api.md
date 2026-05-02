@@ -30,7 +30,7 @@ exconv.conv2d    # 2D convolution (images & scalar fields)
 
 exconv.dsp       # signal-processing utilities (envelopes, crossfades, normalization)
 
-exconv.xmodal    # cross-modal tools (soundimage), via submodules
+exconv.xmodal    # cross-modal tools, via submodules
 
 exconv.mir       # beat/novelty/structure helpers for block segmentation
 
@@ -76,9 +76,9 @@ m = next_fast_len_ge(n: int) -> int
 
 
 
-Returns a fast FFT length `m >= n`, using SciPys `next_fast_len` if
+Returns a fast FFT length `m >= n`, using SciPy's `next_fast_len` if
 
-available, then NumPys, otherwise the next power of two.
+available, then NumPy's, otherwise the next power of two.
 
 
 
@@ -135,7 +135,7 @@ y = ifftnd(
 
 
 
-These are thin wrappers over NumPys FFT modules, adding consistent axis
+These are thin wrappers over NumPy's FFT modules, adding consistent axis
 
 normalization and optional real FFT paths.
 
@@ -550,7 +550,14 @@ from exconv.io import (
 
 ```python
 
-from exconv.conv1d import Audio, auto_convolve, pair_convolve
+from exconv.conv1d import (
+    Audio,
+    AudioConvolutionResult,
+    auto_convolve,
+    pair_convolve,
+    multi_convolve,
+    convolution_family,
+)
 
 ```
 
@@ -700,6 +707,137 @@ Raises `ValueError` if sample rates differ.
 
 
 
+### 3.4 `multi_convolve`
+
+
+
+```python
+
+from exconv.conv1d import multi_convolve
+
+
+
+out = multi_convolve(
+
+    audios: list[Audio],
+
+    mode: str = "same-center",
+
+    circular: bool = False,
+
+    normalize: Optional[str] = "rms",
+
+) -> Audio
+
+```
+
+
+
+N-fold 1D convolution of all input signals. In the frequency domain this is
+equivalent to multiplying every input spectrum at a common FFT length and
+taking one inverse FFT.
+
+
+
+| Param | Description |
+|-------|-------------|
+| `audios` | Input audio objects. Must contain at least one item and all sample rates must match. |
+| `mode` | Linear size policy if `circular=False`. |
+| `circular` | If `True`, use circular convolution with the first audio length. |
+| `normalize` | Output normalization applied once at the end. |
+
+
+
+Length behavior:
+
+- `mode="full"`: output length is `sum(lengths) - (len(audios) - 1)`.
+- `mode="same-first"`: first `audios[0].n_samples` samples of the full result.
+- `mode="same-center"`: centered crop of length `audios[0].n_samples`.
+- `circular=True`: output length is `audios[0].n_samples`.
+
+
+
+Channel semantics match `pair_convolve`: equal channel counts are processed
+per-channel; mixed mono/stereo/multi-channel inputs are downmixed to mono.
+
+
+
+---
+
+
+
+### 3.5 `convolution_family`
+
+
+
+```python
+
+from exconv.conv1d import convolution_family
+
+
+
+results = convolution_family(
+
+    audios: list[Audio],
+
+    names: Optional[list[str]] = None,
+
+    *,
+
+    mode: str = "same-center",
+
+    circular: bool = False,
+
+    normalize: Optional[str] = "rms",
+
+    self_order: int = 2,
+
+    include_self: bool = True,
+
+    include_pairs: bool = True,
+
+    include_multi: bool = True,
+
+) -> list[AudioConvolutionResult]
+
+```
+
+
+
+Generates a stable family of related audio convolutions: self-convolutions,
+unordered pair-convolutions, and one all-input N-fold convolution.
+
+
+
+| Param | Description |
+|-------|-------------|
+| `audios` | Input audio objects. |
+| `names` | Optional labels aligned with `audios`; defaults to string indices. |
+| `mode` | Linear size policy for produced convolutions. |
+| `circular` | Use circular convolution for produced convolutions. |
+| `normalize` | Output normalization applied to each result. |
+| `self_order` | Order for self-convolution outputs. |
+| `include_self` | Include one self-convolution per input. |
+| `include_pairs` | Include every unordered pair. |
+| `include_multi` | Include one all-input N-fold result when there are at least two inputs. |
+
+
+
+`AudioConvolutionResult` fields:
+
+| Field | Description |
+|-------|-------------|
+| `kind` | `"self"`, `"pair"`, or `"multi"`. |
+| `indices` | Input indices used by this result. |
+| `names` | Input labels used by this result. |
+| `audio` | The output `Audio`. |
+
+
+
+---
+
+
+
 ## 4. 2D image convolution (`exconv.conv2d`)
 
 
@@ -834,7 +972,7 @@ out = image_pair_convolve(
 
 
 
-## 5. Cross-modal soundimage (`exconv.xmodal.sound2image`)
+## 5. Cross-modal sound->image (`exconv.xmodal.sound2image`)
 
 
 ### 5.1 Sound -> image (`exconv.xmodal.sound2image`)
@@ -863,6 +1001,12 @@ out = spectral_sculpt(
 
     normalize: bool = True,
 
+    safe_color: bool = True,
+
+    chroma_strength: float = 0.5,
+
+    chroma_clip: float = 0.25,
+
 ) -> np.ndarray
 
 ```
@@ -876,7 +1020,10 @@ out = spectral_sculpt(
 | `sr`       | Sample rate (currently unused, reserved).          |
 | `mode`     | How audio channels map to radial filters.          |
 | `colorspace`| `"luma"` (luminance only) or `"color"` (YCbCr).   |
-| `normalize`| If `True`, normalizes the final output: lumaglobal [0,1], colorclipped to [0,1]. |
+| `normalize`| If `True`, normalizes/clips the final output. |
+| `safe_color` | In color mode, normalize Y and compress chroma before RGB conversion. |
+| `chroma_strength` | Blend from original chroma (`0.0`) to fully filtered chroma (`1.0`). |
+| `chroma_clip` | Maximum chroma deviation around `0.5` when `safe_color=True`. |
 
 
 
@@ -1047,7 +1194,7 @@ exconv sound2image     --img img.png     --audio audio.wav     --out sculpted.pn
 
 
 
-Provides a CLI faade over `spectral_sculpt` for quick experiments.
+Provides a CLI facade over `spectral_sculpt` for quick experiments.
 Optional upscaling: `--upscale <factor>` with `--upscale-method`
 (`lanczos`, `bicubic`, or `opencv-*`). OpenCV methods require
 `--upscale-model` (opencv-contrib-python ships with exconv).
@@ -1064,6 +1211,7 @@ Key notes:
 - `--audio` is optional; if omitted, audio is extracted from the input video (ffmpeg required). If `--audio` points to a video file, its audio track is auto-extracted.
 - `--serial-mode`: `parallel`, `serial-image-first`, `serial-sound-first`.
 - `--audio-length-mode`: `trim`, `pad-zero`, `pad-loop`, `pad-noise`, `center-zero`.
+- `--preview-seconds`: limit processing to the first N seconds (quick test run).
 - `--block-strategy`: `fixed` uses frame counts; `beats`/`novelty`/`structure` analyze audio to set block boundaries.
 - `--block-size`: process frames in blocks (e.g., 12/24/50/120/240). The block time range defines the audio chunk reused for sound->image; image->sound uses the block mean image (or mean of processed frames in `serial-image-first`) with that chunk.
 - `--crossover`: optional block boundary crossfade for both frames and audio.
@@ -1084,12 +1232,32 @@ See `docs/design.md` section 6.3 for image->sound details and section 6.4 for bl
 ### 7.6 `folderbatch`
 
 ```bash
-exconv folderbatch my_project --root samples --audio-mode same-center --audio-order 2 --audio-normalize rms
+exconv folderbatch my_project --root samples --audio-mode same-center --audio-order 2 --audio-normalize rms --audio-multi-circular
 ```
 
-Batch audio self/pair convolution and optional sound->image outputs across a
-project folder. See `docs/scripts.md` for the grouped flag list and the
-expected `samples/` folder layout.
+Batch audio self, pair and all-input N-fold convolution plus optional
+sound->image outputs across a project folder. See `docs/scripts.md` for the
+complete grouped flag list and the expected `samples/` folder layout.
+
+Audio outputs:
+
+| Output folder | Contents |
+|---------------|----------|
+| `output/audio/<project>/self/` | One self-convolution per input. |
+| `output/audio/<project>/pair/` | One output per unordered input pair. |
+| `output/audio/<project>/multi/` | One all-files N-fold convolution. |
+
+Audio options:
+
+| Option | Description |
+|--------|-------------|
+| `--audio-mode` | Linear convolution size policy: `full`, `same-first`, `same-center`. |
+| `--audio-order` | Self-convolution order. |
+| `--audio-circular` | Use circular convolution for all audio outputs. |
+| `--audio-multi-circular` | Use circular convolution only for the all-files N-fold output. |
+| `--audio-normalize` | `rms`, `peak`, or `none`. |
+| `--audio-subtype` | libsndfile subtype for WAV/FLAC outputs. |
+
 Use `--s2i-animate` to emit per-audio animations into the `animations/`
 subfolder (defaults to mp4 with audio unless `--s2i-animate-no-audio`).
 For sound->image parameter semantics, see `docs/design.md` sections 6.1-6.2.
@@ -1101,7 +1269,8 @@ exconv video-folderbatch my_project --jobs 2 --suffix _biconv --serial-mode para
 ```
 
 Batch-run `video-biconv` over every video in a project folder, with optional
-audio-driven block segmentation and per-block crossfades. See `docs/scripts.md`
+audio-driven block segmentation and per-block crossfades. Use
+`--preview-seconds` for quick test runs. See `docs/scripts.md`
 for the full set of batch flags.
 For block strategy and crossover details, see `docs/design.md` section 6.4.
 

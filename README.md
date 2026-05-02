@@ -52,7 +52,7 @@ from exconv.io import read_audio, write_audio
 from exconv.conv1d import Audio, auto_convolve
 
 # Load file
-samples, sr = read_audio("samples/input/audio/drum.wav", dtype="float32")
+samples, sr = read_audio("samples/input/audio/original.wav", dtype="float32")
 
 # Wrap into Audio container
 a = Audio(samples=samples, sr=sr)
@@ -67,7 +67,7 @@ boom = auto_convolve(
 )
 
 # Save result
-write_audio("samples/output/audio/drum_boom.wav", boom.samples, boom.sr)
+write_audio("samples/output/audio/original_boom.wav", boom.samples, boom.sr)
 ```
 
 ---
@@ -153,12 +153,12 @@ radial filters and Y/Cb/Cr channels.
 
 Use the included samples for a quick spin:
 
-- Audio auto: `exconv audio-auto --in samples/input/audio/drum.wav --out samples/output/audio/drum_auto.wav --order 2`
+- Audio auto: `exconv audio-auto --in samples/input/audio/original.wav --out samples/output/audio/original_auto.wav --order 2`
 - Image auto: `exconv img-auto --in samples/input/img/glitch_bean.png --out samples/output/img/glitch_auto.png`
 - Sound→image: `exconv sound2image --img samples/input/img/glitch_bean.png --audio samples/input/audio/original.wav --out samples/output/img/glitch_sculpt.png --colorspace luma`
 - Image→sound: `python scripts/image2sound_demo.py --audio samples/input/test_assets/audio_long_sines.wav --image samples/input/test_assets/img_checker.png --mode radial --impulse-len auto --phase-mode spiral --out-dir samples/output/audio/img2sound_demo`
 - Bi-conv video: `exconv video-biconv --video samples/input/video/test_01.mp4 --out-video samples/output/video/test_01_biconv.mp4 --out-audio samples/output/audio/test_01_biconv.wav --serial-mode parallel --audio-length-mode pad-zero --i2s-phase-mode spiral --i2s-impulse-len auto`
-- Batch audio + sound2image: `exconv folderbatch my_project --root samples --audio-mode same-center --audio-order 2 --audio-normalize rms`
+- Batch audio + sound2image: `exconv folderbatch my_project --root samples --audio-mode same-center --audio-order 2 --audio-normalize rms --audio-multi-circular`
 - Batch video: `exconv video-folderbatch my_project --jobs 2 --suffix _biconv --serial-mode parallel`
 - Animate frames: `exconv animate samples/output/sound2image/my_project/animations out.mp4 --fps 12`
 
@@ -228,16 +228,19 @@ Optional upscaling: add `--upscale <factor>` with `--upscale-method`
 (e.g. `lanczos`, `bicubic`, or `opencv-*`). OpenCV methods require
 `--upscale-model` (opencv-contrib-python ships with exconv).
 
-Additional options (subject to change while the experiment evolves):
+Options:
 
-| Option          | Values                                              | Description                      |
-|-----------------|-----------------------------------------------------|----------------------------------|
-| `--colorspace`  | `luma`, `channels`                                  | Luma-only vs color processing.  |
-| `--stereo-mode` | `collapse`, `mid-side-color`, `lr-color`, `mid-side-angular` | Different stereo mappings. |
-| `--min-gain`    | float                                               | Min chroma gain in color modes. |
-| `--beta`        | float                                               | Chroma scaling factor.          |
-| `--alpha`       | float                                               | Angular modulation strength.    |
-| `--no-normalize`| flag                                                | Disable output normalization.   |
+| Option | Values | Description |
+|--------|--------|-------------|
+| `--img` | path | Input image. |
+| `--audio` | path | Input audio. |
+| `--out` | path | Output image. |
+| `--mode` | `mono`, `stereo`, `mid-side` | How audio channels map to image filters. |
+| `--colorspace` | `luma`, `color` | Luma-only or YCbCr color filtering. |
+| `--no-normalize` | flag | Disable final output normalization/clipping. |
+| `--upscale` | float | Output scale factor; `1.0` disables. |
+| `--upscale-method` | see `exconv --help` | Pillow or OpenCV upscaler. |
+| `--upscale-model` | path | `.pb` model for OpenCV super-resolution methods. |
 
 The command internally calls the `spectral_sculpt` function in
 `exconv.xmodal.sound2image`.
@@ -304,6 +307,7 @@ Core controls:
 | `--mux/--no-mux` | `--mux` | Mux processed audio into output video (requires ffmpeg). |
 | `--serial-mode` | `parallel` | `parallel`, `serial-image-first`, `serial-sound-first`. |
 | `--audio-length-mode` | `pad-zero` | See strategies table below. |
+| `--preview-seconds` | None | Limit processing to the first N seconds (quick test run). |
 
 Block segmentation:
 
@@ -360,6 +364,38 @@ Audio length strategies:
 | `pad-noise`    | Pad tail with low-level noise               |
 
 Outputs: processed video and audio files written to the given paths.
+
+### 7. Folder batch (`exconv folderbatch`)
+
+Run self, pair and all-files N-fold audio convolution for a project folder,
+and optionally run sound->image for matching image inputs:
+
+```bash
+exconv folderbatch mlejn \
+  --root samples \
+  --audio-mode same-center \
+  --audio-order 2 \
+  --audio-normalize rms \
+  --audio-multi-circular
+```
+
+Inputs are read from `<root>/input/audio/<project>/` and, if present,
+`<root>/input/img/<project>/`. Audio outputs are written to
+`<root>/output/audio/<project>/{self,pair,multi}/`.
+
+Audio options:
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `--audio-mode` | `full`, `same-first`, `same-center` | Linear size policy for self, pair and linear multi convolution. |
+| `--audio-order` | integer >= 1 | Self-convolution order. |
+| `--audio-circular` | flag | Use circular convolution for all audio outputs. |
+| `--audio-multi-circular` | flag | Use circular convolution only for the all-files N-fold output; useful for long recordings. |
+| `--audio-normalize` | `rms`, `peak`, `none` | Output normalization. |
+| `--audio-subtype` | e.g. `PCM_16`, `PCM_24`, `FLOAT` | libsndfile output subtype. |
+
+Sound->image and animation options are documented in
+[`docs/scripts.md`](docs/scripts.md).
 
 ---
 
