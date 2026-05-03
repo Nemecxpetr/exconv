@@ -1202,7 +1202,26 @@ Optional upscaling: `--upscale <factor>` with `--upscale-method`
 `--upscale-model` (opencv-contrib-python ships with exconv).
 See `docs/design.md` sections 6.1-6.2 for the sound->image mapping details.
 
-### 7.5 `video-biconv`
+### 7.5 `spectrogram`
+
+```bash
+exconv spectrogram --audio input.wav --out input_spectrogram.png
+```
+
+Writes a PNG spectrogram for an audio file. If `--out` is omitted, the output
+defaults to `<input>.spectrogram.png`.
+
+Useful controls:
+
+- `--channel`: `mono`, `left`, `right`, `mid`, or `side`.
+- `--n-fft` / `--hop-length`: time/frequency resolution.
+- `--min-freq` / `--max-freq`: displayed frequency range.
+- `--start-seconds` / `--max-seconds`: render only part of a long file.
+- `--linear-freq`: use a linear frequency axis instead of log frequency.
+- `--linear-amplitude`: use linear magnitude instead of dB.
+- `--cmap`: Matplotlib colormap, default `magma`.
+
+### 7.6 `video-biconv`
 
 ```bash
 exconv video-biconv     --video input.mp4     --out-video out_biconv.mp4     --serial-mode parallel     --audio-length-mode pad-zero     --i2s-mode radial     --i2s-impulse-len auto
@@ -1231,7 +1250,7 @@ Optional upscaling: `--upscale <factor>` with `--upscale-method`
 `--upscale-model` (opencv-contrib-python ships with exconv).
 See `docs/design.md` section 6.3 for image->sound details and section 6.4 for block behavior.
 
-### 7.6 `folderbatch`
+### 7.7 `folderbatch`
 
 ```bash
 exconv folderbatch my_project --root samples --audio-mode same-center --audio-order 2 --audio-normalize rms
@@ -1266,7 +1285,7 @@ Use `--s2i-animate` to emit per-audio animations into the `animations/`
 subfolder (defaults to mp4 with audio unless `--s2i-animate-no-audio`).
 For sound->image parameter semantics, see `docs/design.md` sections 6.1-6.2.
 
-### 7.7 `video-folderbatch`
+### 7.8 `video-folderbatch`
 
 ```bash
 exconv video-folderbatch my_project --jobs 2 --suffix _biconv --serial-mode parallel
@@ -1278,7 +1297,7 @@ audio-driven block segmentation and per-block crossfades. Use
 for the full set of batch flags.
 For block strategy and crossover details, see `docs/design.md` section 6.4.
 
-### 7.8 `animate`
+### 7.9 `animate`
 
 ```bash
 exconv animate frames_dir out.mp4 --fps 12

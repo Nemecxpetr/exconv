@@ -29,6 +29,7 @@ from exconv.cli.settings import (
 )
 from exconv.io import (
     read_audio,
+    read_segment,
     write_audio,
     read_image,
     write_image,
@@ -319,6 +320,120 @@ def _cmd_animate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _select_audio_channel(audio: np.ndarray, channel: str) -> np.ndarray:
+    if audio.ndim != 2:
+        raise ValueError(f"Expected 2D audio array, got {audio.shape}")
+    if audio.shape[1] == 0:
+        raise ValueError("Audio has no channels")
+    if channel == "mono":
+        return audio.mean(axis=1, dtype=np.float32)
+    if channel == "left":
+        return audio[:, 0]
+    if channel == "right":
+        idx = 1 if audio.shape[1] > 1 else 0
+        return audio[:, idx]
+    if channel == "mid":
+        if audio.shape[1] == 1:
+            return audio[:, 0]
+        return ((audio[:, 0] + audio[:, 1]) * 0.5).astype(np.float32, copy=False)
+    if channel == "side":
+        if audio.shape[1] == 1:
+            return np.zeros((audio.shape[0],), dtype=np.float32)
+        return ((audio[:, 0] - audio[:, 1]) * 0.5).astype(np.float32, copy=False)
+    raise ValueError(f"Unknown channel mode: {channel}")
+
+
+def _cmd_spectrogram(args: argparse.Namespace) -> int:
+    audio_path = _path(args.audio)
+    out_path = (
+        _path(args.out)
+        if args.out is not None
+        else audio_path.with_suffix(".spectrogram.png")
+    )
+
+    if args.n_fft <= 0:
+        raise SystemExit("--n-fft must be positive")
+    if args.hop_length <= 0:
+        raise SystemExit("--hop-length must be positive")
+    if args.hop_length > args.n_fft:
+        raise SystemExit("--hop-length must be <= --n-fft")
+    if args.dpi <= 0:
+        raise SystemExit("--dpi must be positive")
+    if args.max_freq is not None and args.max_freq <= 0:
+        raise SystemExit("--max-freq must be positive")
+    if args.min_freq < 0:
+        raise SystemExit("--min-freq must be >= 0")
+    if args.max_freq is not None and args.max_freq <= args.min_freq:
+        raise SystemExit("--max-freq must be greater than --min-freq")
+    if args.start_seconds < 0:
+        raise SystemExit("--start-seconds must be >= 0")
+    if args.max_seconds is not None and args.max_seconds <= 0:
+        raise SystemExit("--max-seconds must be positive")
+
+    from scipy.signal import spectrogram
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if args.start_seconds > 0 or args.max_seconds is not None:
+        stop = (
+            args.start_seconds + args.max_seconds
+            if args.max_seconds is not None
+            else None
+        )
+        audio, sr = read_segment(
+            audio_path,
+            start=args.start_seconds,
+            stop=stop,
+            unit="seconds",
+            dtype="float32",
+            always_2d=True,
+        )
+    else:
+        audio, sr = read_audio(audio_path, dtype="float32", always_2d=True)
+    samples = _select_audio_channel(audio, args.channel)
+    if samples.size == 0:
+        raise SystemExit("Input audio is empty")
+
+    freqs, times, mag = spectrogram(
+        samples,
+        fs=sr,
+        window="hann",
+        nperseg=int(args.n_fft),
+        noverlap=int(args.n_fft - args.hop_length),
+        scaling="spectrum",
+        mode="magnitude",
+    )
+    if args.db:
+        values = 20.0 * np.log10(np.maximum(mag, 1e-10))
+        color_label = "Magnitude (dB)"
+    else:
+        values = mag
+        color_label = "Magnitude"
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(float(args.width), float(args.height)))
+    plt.pcolormesh(times, freqs, values, shading="auto", cmap=args.cmap)
+    if args.log_freq:
+        min_freq = max(float(args.min_freq), 1.0)
+        plt.yscale("log")
+    else:
+        min_freq = float(args.min_freq)
+    max_freq = float(args.max_freq) if args.max_freq is not None else float(sr) / 2.0
+    plt.ylim(min_freq, max_freq)
+    plt.colorbar(label=color_label)
+    plt.xlabel("Time (s)")
+    plt.ylabel("Frequency (Hz)")
+    plt.title(audio_path.name)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=int(args.dpi))
+    plt.close()
+    print(f"[done] wrote spectrogram {out_path}")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -567,6 +682,103 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Audio file to mux into mp4 output (requires ffmpeg).",
     )
     p_anim.set_defaults(func=_cmd_animate)
+
+    # ---- spectrogram ----
+    p_spec = subparsers.add_parser(
+        "spectrogram",
+        help="Render an audio file as a spectrogram image.",
+    )
+    add_settings_args(p_spec)
+    p_spec.add_argument(
+        "--audio",
+        required=True,
+        help="Input audio file.",
+    )
+    p_spec.add_argument(
+        "--out",
+        default=None,
+        help="Output image path. Defaults to <audio>.spectrogram.png.",
+    )
+    p_spec.add_argument(
+        "--channel",
+        choices=["mono", "left", "right", "mid", "side"],
+        default="mono",
+        help="Channel view to render.",
+    )
+    p_spec.add_argument(
+        "--n-fft",
+        type=int,
+        default=2048,
+        help="FFT/window size in samples.",
+    )
+    p_spec.add_argument(
+        "--hop-length",
+        type=int,
+        default=512,
+        help="Hop length in samples.",
+    )
+    p_spec.add_argument(
+        "--min-freq",
+        type=float,
+        default=20.0,
+        help="Minimum displayed frequency in Hz.",
+    )
+    p_spec.add_argument(
+        "--max-freq",
+        type=float,
+        default=None,
+        help="Maximum displayed frequency in Hz. Defaults to Nyquist.",
+    )
+    p_spec.add_argument(
+        "--start-seconds",
+        type=float,
+        default=0.0,
+        help="Start time in seconds for partial renders.",
+    )
+    p_spec.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help="Render at most this many seconds of audio.",
+    )
+    p_spec.add_argument(
+        "--linear-freq",
+        dest="log_freq",
+        action="store_false",
+        help="Use a linear frequency axis instead of log frequency.",
+    )
+    p_spec.set_defaults(log_freq=True)
+    p_spec.add_argument(
+        "--linear-amplitude",
+        dest="db",
+        action="store_false",
+        help="Use linear magnitude instead of dB.",
+    )
+    p_spec.set_defaults(db=True)
+    p_spec.add_argument(
+        "--cmap",
+        default="magma",
+        help="Matplotlib colormap name.",
+    )
+    p_spec.add_argument(
+        "--width",
+        type=float,
+        default=14.0,
+        help="Figure width in inches.",
+    )
+    p_spec.add_argument(
+        "--height",
+        type=float,
+        default=6.0,
+        help="Figure height in inches.",
+    )
+    p_spec.add_argument(
+        "--dpi",
+        type=int,
+        default=160,
+        help="Output image DPI.",
+    )
+    p_spec.set_defaults(func=_cmd_spectrogram)
 
     # ---- folderbatch ----
     register_folderbatch_subcommand(subparsers)

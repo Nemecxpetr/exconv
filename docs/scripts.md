@@ -295,6 +295,30 @@ Note: `scripts/folderbatch.py` still exists as a legacy wrapper; use
   | `--upscale-method` | `lanczos` | Upscale method; opencv-* requires a model. |
   | `--upscale-model` | None | Model path for opencv-* upscalers. |
 
+### `exconv spectrogram` - render an audio spectrogram image
+- Purpose: write a PNG spectrogram for a WAV/FLAC/etc. file.
+- Example:
+  ```bash
+  exconv spectrogram --audio input.wav --out input_spectrogram.png
+  ```
+
+  If `--out` is omitted, the output defaults to `<input>.spectrogram.png`.
+
+  | Option | Default | What it does |
+  | --- | --- | --- |
+  | `--audio` | required | Input audio file. |
+  | `--out` | `<audio>.spectrogram.png` | Output PNG path. |
+  | `--channel` | `mono` | `mono`, `left`, `right`, `mid`, or `side`. |
+  | `--n-fft` | `2048` | FFT/window size in samples. |
+  | `--hop-length` | `512` | Hop length in samples. |
+  | `--min-freq` | `20` | Minimum displayed frequency in Hz. |
+  | `--max-freq` | Nyquist | Maximum displayed frequency in Hz. |
+  | `--start-seconds` | `0` | Start time for partial renders. |
+  | `--max-seconds` | None | Render at most this many seconds. |
+  | `--linear-freq` | off | Use a linear frequency axis instead of log. |
+  | `--linear-amplitude` | off | Use linear magnitude instead of dB. |
+  | `--cmap` | `magma` | Matplotlib colormap. |
+
 ### `exconv animate` - create GIF/MP4 from image sequence
 - Purpose: turn a folder of images into a GIF or MP4.
 - Example:

@@ -155,6 +155,7 @@ Use the included samples for a quick spin:
 
 - Audio auto: `exconv audio-auto --in samples/input/audio/original.wav --out samples/output/audio/original_auto.wav --order 2`
 - Image auto: `exconv img-auto --in samples/input/img/glitch_bean.png --out samples/output/img/glitch_auto.png`
+- Spectrogram: `exconv spectrogram --audio samples/input/test_assets/audio_long_sines.wav --out samples/output/audio/audio_long_sines_spectrogram.png`
 - Sound→image: `exconv sound2image --img samples/input/img/glitch_bean.png --audio samples/input/audio/original.wav --out samples/output/img/glitch_sculpt.png --colorspace luma`
 - Image→sound: `python scripts/image2sound_demo.py --audio samples/input/test_assets/audio_long_sines.wav --image samples/input/test_assets/img_checker.png --mode radial --impulse-len auto --phase-mode spiral --out-dir samples/output/audio/img2sound_demo`
 - Bi-conv video: `exconv video-biconv --video samples/input/video/test_01.mp4 --out-video samples/output/video/test_01_biconv.mp4 --out-audio samples/output/audio/test_01_biconv.wav --serial-mode parallel --audio-length-mode pad-zero --i2s-phase-mode spiral --i2s-impulse-len auto`
@@ -262,7 +263,31 @@ The command internally calls the `spectral_sculpt` function in
 
 ---
 
-### 4. Image demo helper (`exconv-image`, legacy)
+### 4. Spectrogram helper
+
+Render a WAV/FLAC/etc. file as a spectrogram PNG:
+
+```bash
+exconv spectrogram \
+  --audio input.wav \
+  --out input_spectrogram.png
+```
+
+If `--out` is omitted, the image is written next to the input as
+`<input>.spectrogram.png`.
+
+Useful options:
+- `--channel`: `mono`, `left`, `right`, `mid`, or `side`.
+- `--n-fft` / `--hop-length`: time/frequency resolution.
+- `--min-freq` / `--max-freq`: displayed frequency range.
+- `--start-seconds` / `--max-seconds`: render only part of a long file.
+- `--linear-freq`: use a linear frequency axis instead of log frequency.
+- `--linear-amplitude`: use linear magnitude instead of dB.
+- `--cmap`: Matplotlib colormap, default `magma`.
+
+---
+
+### 5. Image demo helper (`exconv-image`, legacy)
 
 The `exconv-image` entry point runs a simpler demo for auto/pair convolution
 on a single image and saves JPEG outputs:
@@ -273,7 +298,7 @@ exconv-image samples/input/img/glitch_bean.png samples/output/img   --mode same-
 
 Results are stored in `OUTPUT_DIR/<mode>/...`.
 
-### 5. Image -> sound demo (scripts/image2sound_demo.py)
+### 6. Image -> sound demo (scripts/image2sound_demo.py)
 
 Derive an impulse from an image and convolve audio with it (flat, histogram, or radial FFT mapping):
 
@@ -296,7 +321,7 @@ Key options:
 
 Outputs: convolved audio WAV and an impulse visualization PNG in `--out-dir`.
 
-### 6. Bi-directional video convolution (`exconv video-biconv`)
+### 7. Bi-directional video convolution (`exconv video-biconv`)
 
 Per-frame sound->image and image->sound with parallel/serial chaining. Provide a video for frames and an audio file (can be the original track or external):
 
