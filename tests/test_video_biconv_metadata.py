@@ -238,3 +238,85 @@ def test_video_biconv_preserves_basic_metadata(test_assets_dir: Path, tmp_path: 
     if errors:
         pytest.fail("Metadata changed:\n- " + "\n- ".join(errors) + f"\nCSV: {csv_path}")
 
+
+def test_video_biconv_preview_seconds_limits_video_and_audio(
+    test_assets_dir: Path,
+    tmp_path: Path,
+) -> None:
+    checker = test_assets_dir / "img_checker.png"
+    audio = test_assets_dir / "audio_plucks.wav"
+    if not checker.exists() or not audio.exists():
+        pytest.skip("Missing required test assets (img_checker.png / audio_plucks.wav).")
+
+    fps = 25.0
+    preview_seconds = 0.2
+    expected_frames = int(np.ceil(preview_seconds * fps))
+
+    in_video = tmp_path / "video_checker_scroll_preview.mp4"
+    out_video = tmp_path / "video_checker_scroll_preview_biconv.mp4"
+    out_audio = tmp_path / "video_checker_scroll_preview_biconv.wav"
+
+    _write_scrolling_checker_video(
+        in_video,
+        checker_path=checker,
+        fps=fps,
+        n_frames=16,
+        size_hw=(96, 128),
+    )
+
+    n_frames, audio_shape, fps_used, sr = biconv_video_to_files_stream(
+        video_path=in_video,
+        audio_path=audio,
+        preview_seconds=preview_seconds,
+        fps=None,
+        serial_mode="parallel",
+        audio_length_mode="pad-zero",
+        block_size=2,
+        s2i_mode="mono",
+        s2i_colorspace="luma",
+        i2s_mode="radial",
+        i2s_colorspace="luma",
+        i2s_phase_mode="zero",
+        i2s_impulse_len="frame",
+        out_video=out_video,
+        out_audio=out_audio,
+        mux_output=False,
+    )
+
+    info = _read_video_info(out_video)
+    expected_samples = int(np.ceil(preview_seconds * sr))
+
+    assert fps_used == pytest.approx(fps)
+    assert n_frames == expected_frames
+    assert info.counted_frames == expected_frames
+    assert audio_shape[0] == expected_samples
+    assert out_audio.exists()
+
+
+def test_video_biconv_preview_seconds_must_be_positive(
+    test_assets_dir: Path,
+    tmp_path: Path,
+) -> None:
+    checker = test_assets_dir / "img_checker.png"
+    audio = test_assets_dir / "audio_plucks.wav"
+    if not checker.exists() or not audio.exists():
+        pytest.skip("Missing required test assets (img_checker.png / audio_plucks.wav).")
+
+    in_video = tmp_path / "video_checker_scroll_invalid_preview.mp4"
+    _write_scrolling_checker_video(
+        in_video,
+        checker_path=checker,
+        fps=25.0,
+        n_frames=4,
+        size_hw=(96, 128),
+    )
+
+    with pytest.raises(ValueError, match="preview_seconds must be > 0"):
+        biconv_video_to_files_stream(
+            video_path=in_video,
+            audio_path=audio,
+            preview_seconds=0.0,
+            out_video=tmp_path / "unused.mp4",
+            out_audio=None,
+            mux_output=False,
+        )
