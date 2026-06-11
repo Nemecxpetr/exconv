@@ -9,6 +9,9 @@ import numpy as np
 import pytest
 
 from exconv.xmodal import biconv_video_to_files_stream
+from exconv.xmodal.video import (
+    _blend_boundary_audio_preserve_length,
+)
 
 
 @dataclass(frozen=True)
@@ -126,7 +129,9 @@ def _write_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
         w.writerows(rows)
 
 
-def test_video_biconv_preserves_basic_metadata(test_assets_dir: Path, tmp_path: Path) -> None:
+def test_video_biconv_preserves_basic_metadata(
+    test_assets_dir: Path, tmp_path: Path
+) -> None:
     """
     Generate a tiny deterministic MP4 (checkerboard scroll) with known FPS, then
     run biconv with different settings and ensure the output video's fps/frames/size
@@ -137,7 +142,9 @@ def test_video_biconv_preserves_basic_metadata(test_assets_dir: Path, tmp_path: 
     checker = test_assets_dir / "img_checker.png"
     audio = test_assets_dir / "audio_plucks.wav"
     if not checker.exists() or not audio.exists():
-        pytest.skip("Missing required test assets (img_checker.png / audio_plucks.wav).")
+        pytest.skip(
+            "Missing required test assets (img_checker.png / audio_plucks.wav)."
+        )
 
     in_video = test_assets_dir / "video_checker_scroll_25fps.mp4"
     _write_scrolling_checker_video(
@@ -157,6 +164,12 @@ def test_video_biconv_preserves_basic_metadata(test_assets_dir: Path, tmp_path: 
         {"block_size": 1, "i2s_impulse_len": "auto"},
         {"block_size": 4, "i2s_impulse_len": "frame"},
         {"block_size": 4, "i2s_impulse_len": "auto"},
+        {
+            "block_size": 4,
+            "i2s_impulse_len": "auto",
+            "block_crossover": "equal",
+            "block_crossover_frames": 2,
+        },
         {"block_size": 4, "i2s_impulse_len": 256},
     ]
 
@@ -180,7 +193,12 @@ def test_video_biconv_preserves_basic_metadata(test_assets_dir: Path, tmp_path: 
         )
 
         for v in variants:
-            label = f"bs{v['block_size']}_imp{v['i2s_impulse_len']}"
+            crossover = v.get("block_crossover", "none")
+            crossover_frames = int(v.get("block_crossover_frames", 0))
+            label = (
+                f"bs{v['block_size']}_imp{v['i2s_impulse_len']}"
+                f"_xo{crossover}{crossover_frames}"
+            )
             out_video = tmp_path / f"{in_video.stem}__{label}{in_video.suffix}"
 
             biconv_video_to_files_stream(
@@ -196,6 +214,8 @@ def test_video_biconv_preserves_basic_metadata(test_assets_dir: Path, tmp_path: 
                 i2s_colorspace="luma",
                 i2s_phase_mode="zero",
                 i2s_impulse_len=v["i2s_impulse_len"],  # type: ignore[arg-type]
+                block_crossover=crossover,  # type: ignore[arg-type]
+                block_crossover_frames=crossover_frames,
                 out_video=out_video,
                 out_audio=None,
                 mux_output=False,
@@ -220,7 +240,9 @@ def test_video_biconv_preserves_basic_metadata(test_assets_dir: Path, tmp_path: 
                 errors.append(f"{label}: output fps metadata missing")
             else:
                 if abs(info.fps_meta - baseline.fps_meta) > 1e-2:
-                    errors.append(f"{label}: fps changed {baseline.fps_meta} -> {info.fps_meta}")
+                    errors.append(
+                        f"{label}: fps changed {baseline.fps_meta} -> {info.fps_meta}"
+                    )
 
             if info.counted_frames != baseline.counted_frames:
                 errors.append(
@@ -236,7 +258,9 @@ def test_video_biconv_preserves_basic_metadata(test_assets_dir: Path, tmp_path: 
         _write_csv(csv_path, rows)
 
     if errors:
-        pytest.fail("Metadata changed:\n- " + "\n- ".join(errors) + f"\nCSV: {csv_path}")
+        pytest.fail(
+            "Metadata changed:\n- " + "\n- ".join(errors) + f"\nCSV: {csv_path}"
+        )
 
 
 def test_video_biconv_preview_seconds_limits_video_and_audio(
@@ -246,7 +270,9 @@ def test_video_biconv_preview_seconds_limits_video_and_audio(
     checker = test_assets_dir / "img_checker.png"
     audio = test_assets_dir / "audio_plucks.wav"
     if not checker.exists() or not audio.exists():
-        pytest.skip("Missing required test assets (img_checker.png / audio_plucks.wav).")
+        pytest.skip(
+            "Missing required test assets (img_checker.png / audio_plucks.wav)."
+        )
 
     fps = 25.0
     preview_seconds = 0.2
@@ -300,7 +326,9 @@ def test_video_biconv_preview_seconds_must_be_positive(
     checker = test_assets_dir / "img_checker.png"
     audio = test_assets_dir / "audio_plucks.wav"
     if not checker.exists() or not audio.exists():
-        pytest.skip("Missing required test assets (img_checker.png / audio_plucks.wav).")
+        pytest.skip(
+            "Missing required test assets (img_checker.png / audio_plucks.wav)."
+        )
 
     in_video = tmp_path / "video_checker_scroll_invalid_preview.mp4"
     _write_scrolling_checker_video(
@@ -320,3 +348,27 @@ def test_video_biconv_preview_seconds_must_be_positive(
             out_audio=None,
             mux_output=False,
         )
+
+
+def test_block_crossover_preserves_boundary_audio_count() -> None:
+    prev_frames = [
+        np.full((2, 2, 3), 20, dtype=np.uint8),
+        np.full((2, 2, 3), 40, dtype=np.uint8),
+    ]
+    cur_frames = [
+        np.full((2, 2, 3), 180, dtype=np.uint8),
+        np.full((2, 2, 3), 220, dtype=np.uint8),
+    ]
+
+    joined_frames = [*prev_frames, *cur_frames]
+    assert len(joined_frames) == len(prev_frames) + len(cur_frames)
+
+    prev_audio = np.ones((96, 2), dtype=np.float32) * 0.25
+    cur_audio = np.ones((96, 2), dtype=np.float32) * -0.25
+    blended_audio = _blend_boundary_audio_preserve_length(
+        prev_audio,
+        cur_audio,
+        mode="equal",
+    )
+
+    assert blended_audio.shape == (prev_audio.shape[0] + cur_audio.shape[0], 2)

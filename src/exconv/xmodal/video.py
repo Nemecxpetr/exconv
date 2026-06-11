@@ -1,25 +1,36 @@
 # src/exconv/xmodal/video.py
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple, Literal, overload, Optional
+import math
 import subprocess
 import tempfile
 from io import BytesIO
-import math
+from pathlib import Path
+from typing import List, Literal, Optional, Sequence, Tuple, overload
 
 import numpy as np
 import soundfile as sf
 from tqdm import tqdm
 
+from exconv.conv1d.audio import Audio
+from exconv.conv1d.audio import auto_convolve as audio_auto_convolve
 from exconv.dsp.crossfade import CrossfadeMode, crossfade_weights
 from exconv.dsp.envelopes import EnvelopeCurve, apply_adsr
 from exconv.dsp.segments import (
     AudioLengthMode as DspAudioLengthMode,
-    slice_for_frame,
+)
+from exconv.dsp.segments import (
+    audio_chunk_for_interval,
     frame_range_samples,
     match_audio_length,
-    audio_chunk_for_interval,
+    slice_for_frame,
+)
+from exconv.io import (
+    read_audio,
+    read_video_frames,
+    upscale_image,
+    write_audio,
+    write_video_frames,
 )
 from exconv.video_meta import (
     build_exconv_metadata,
@@ -27,28 +38,24 @@ from exconv.video_meta import (
     ffprobe_fps_info,
     parse_float,
 )
-from exconv.io import (
-    read_audio,
-    write_audio,
-    read_video_frames,
-    write_video_frames,
-    upscale_image,
-)
-from exconv.conv1d.audio import Audio, auto_convolve as audio_auto_convolve
-from .sound2image import spectral_sculpt, Mode, ColorMode
+
 from .image2sound import (
+    ColorMode as Img2SoundColorMode,
+)
+from .image2sound import (
+    ImpulseNorm,
+    OutNorm,
+    PhaseMode,
+    RadiusMode,
+    SmoothingMode,
     image2sound_flat,
     image2sound_hist,
     image2sound_radial,
-    PadMode as Img2SoundPadMode,
-    ImpulseNorm,
-    OutNorm,
-    ColorMode as Img2SoundColorMode,
-    RadiusMode,
-    PhaseMode,
-    SmoothingMode,
 )
-
+from .image2sound import (
+    PadMode as Img2SoundPadMode,
+)
+from .sound2image import ColorMode, Mode, spectral_sculpt
 
 AudioVideoMode = Literal["per-buffer-auto", "original"]
 BlockStrategy = Literal["fixed", "beats", "novelty", "structure"]
@@ -154,6 +161,7 @@ def _resolve_fps_for_video(
             return float(candidate)
 
     raise RuntimeError("Could not determine FPS; pass fps explicitly.")
+
 
 _VIDEO_EXTS = {
     ".mp4",
@@ -300,6 +308,36 @@ def _blend_frames(
     blended = prev_arr * w_prev.reshape(w_shape) + cur_arr * w_cur.reshape(w_shape)
     blended = np.clip(blended, 0.0, 255.0).astype(np.uint8)
     return [frame for frame in blended]
+
+
+def _blend_boundary_audio_preserve_length(
+    prev_audio: np.ndarray | None,
+    cur_audio: np.ndarray,
+    *,
+    mode: BlockCrossover,
+) -> np.ndarray:
+    if prev_audio is None or prev_audio.size == 0:
+        return cur_audio
+    if cur_audio.size == 0:
+        return prev_audio
+    if prev_audio.ndim == 1:
+        prev_audio = prev_audio[:, None]
+    if cur_audio.ndim == 1:
+        cur_audio = cur_audio[:, None]
+    if mode == "none":
+        return np.concatenate([prev_audio, cur_audio], axis=0)
+
+    n = min(prev_audio.shape[0], cur_audio.shape[0])
+    if n <= 0:
+        return np.concatenate([prev_audio, cur_audio], axis=0)
+
+    w_prev, w_cur = crossfade_weights(n * 2, mode)
+    first = prev_audio[:n] * w_prev[:n, None] + cur_audio[:n] * w_cur[:n, None]
+    second = prev_audio[:n] * w_prev[n:, None] + cur_audio[:n] * w_cur[n:, None]
+    return np.concatenate(
+        [first, prev_audio[n:], second, cur_audio[n:]],
+        axis=0,
+    ).astype(np.float32)
 
 
 def _should_upscale(scale: float, method: str) -> bool:
@@ -486,8 +524,7 @@ def sound2image_video_arrays(
     upscale: float = 1.0,
     upscale_method: str = "lanczos",
     upscale_model: str | Path | None = None,
-) -> Tuple[List[np.ndarray], np.ndarray]:
-    ...
+) -> Tuple[List[np.ndarray], np.ndarray]: ...
 
 
 def sound2image_video_arrays(
@@ -571,7 +608,7 @@ def sound2image_video_arrays(
             image=frame,
             audio=chunk,
             sr=sr,
-            mode=mode,           # type: ignore[arg-type]
+            mode=mode,  # type: ignore[arg-type]
             colorspace=colorspace,  # type: ignore[arg-type]
             normalize=True,
         )
@@ -869,9 +906,7 @@ def biconv_video_arrays(
     for block_index, (block_start, block_end) in enumerate(block_iter):
         prev_overlap = block_overlaps[block_index - 1] if block_index > 0 else 0
         next_overlap = (
-            block_overlaps[block_index]
-            if block_index < len(block_overlaps)
-            else 0
+            block_overlaps[block_index] if block_index < len(block_overlaps) else 0
         )
 
         ext_start = max(0, block_start - prev_overlap)
@@ -901,8 +936,10 @@ def biconv_video_arrays(
             if img_sum is None:
                 img_sum = np.zeros_like(arr_f, dtype=np.float32)
             img_sum += arr_f
-        img_mean = img_sum / len(block_frames) if img_sum is not None else np.zeros(
-            (1,), dtype=np.float32
+        img_mean = (
+            img_sum / len(block_frames)
+            if img_sum is not None
+            else np.zeros((1,), dtype=np.float32)
         )
 
         # process according to serial mode, but at block granularity
@@ -1040,7 +1077,8 @@ def biconv_video_arrays(
 
         if overlap_head > 0:
             cur_head = base_frames[:overlap_head]
-            frames_out.extend(_blend_frames(prev_tail_frames, cur_head, mode=block_crossover))
+            frames_out.extend(prev_tail_frames)
+            frames_out.extend(cur_head)
         elif prev_overlap == 0 and prev_tail_frames:
             frames_out.extend(prev_tail_frames)
             prev_tail_frames = []
@@ -1069,15 +1107,13 @@ def biconv_video_arrays(
 
         if overlap_head > 0:
             cur_head_audio = _audio_slice(block_start, block_start + overlap_head - 1)
-            if prev_tail_audio is not None:
-                blend_len = min(prev_tail_audio.shape[0], cur_head_audio.shape[0])
-                w_prev, w_cur = crossfade_weights(blend_len, block_crossover)
-                w_prev = w_prev[:, None]
-                w_cur = w_cur[:, None]
-                blended = prev_tail_audio[:blend_len, :] * w_prev + cur_head_audio[:blend_len, :] * w_cur
-                audio_chunks.append(blended.astype(np.float32))
-            elif cur_head_audio.size > 0:
-                audio_chunks.append(cur_head_audio)
+            transition_audio = _blend_boundary_audio_preserve_length(
+                prev_tail_audio,
+                cur_head_audio,
+                mode=block_crossover,
+            )
+            if transition_audio.size > 0:
+                audio_chunks.append(transition_audio)
         elif overlap_head == 0 and prev_tail_audio is not None:
             audio_chunks.append(prev_tail_audio)
 
@@ -1106,8 +1142,10 @@ def biconv_video_arrays(
     if prev_tail_audio is not None:
         audio_chunks.append(prev_tail_audio)
 
-    audio_out = np.concatenate(audio_chunks, axis=0) if audio_chunks else np.zeros(
-        (0, audio.shape[1]), dtype=np.float32
+    audio_out = (
+        np.concatenate(audio_chunks, axis=0)
+        if audio_chunks
+        else np.zeros((0, audio.shape[1]), dtype=np.float32)
     )
     return frames_out, audio_out.astype(np.float32)
 
@@ -1282,7 +1320,12 @@ def biconv_video_from_files(
         temp_audio.parent.mkdir(parents=True, exist_ok=True)
         write_audio(temp_audio, audio_out, sr)
 
-    if mux_output and out_video is not None and temp_video is not None and temp_audio is not None:
+    if (
+        mux_output
+        and out_video is not None
+        and temp_video is not None
+        and temp_audio is not None
+    ):
         if not _ffmpeg_available():
             raise RuntimeError("mux_output requested but ffmpeg not available on PATH")
         metadata_settings = {
@@ -1562,7 +1605,9 @@ def biconv_video_to_files_stream(
         raise ValueError("mux_output=True requires out_video to be set.")
 
     if out_video_p is None and out_audio_p is None and not mux_output:
-        raise ValueError("Nothing to write: pass out_video/out_audio or enable mux_output.")
+        raise ValueError(
+            "Nothing to write: pass out_video/out_audio or enable mux_output."
+        )
 
     temp_video: Path | None = None
     temp_audio: Path | None = None
@@ -1570,7 +1615,9 @@ def biconv_video_to_files_stream(
     if out_video_p is not None:
         out_video_p.parent.mkdir(parents=True, exist_ok=True)
         if mux_output:
-            temp_video = out_video_p.with_name(f"{out_video_p.stem}_tmp_noaudio{out_video_p.suffix}")
+            temp_video = out_video_p.with_name(
+                f"{out_video_p.stem}_tmp_noaudio{out_video_p.suffix}"
+            )
         else:
             temp_video = out_video_p
 
@@ -1644,7 +1691,9 @@ def biconv_video_to_files_stream(
     if temp_video is not None:
         import imageio
 
-        video_writer = imageio.get_writer(str(temp_video), fps=fps_used, macro_block_size=None)
+        video_writer = imageio.get_writer(
+            str(temp_video), fps=fps_used, macro_block_size=None
+        )
 
     # Open audio writer lazily once we know output channels
     audio_writer: sf.SoundFile | None = None
@@ -1748,8 +1797,9 @@ def biconv_video_to_files_stream(
 
             if len(carry_frames) > block_target:
                 carry_frames = carry_frames[-block_target:]
-            prev_overlap = len(carry_frames)
-            base_needed = max(0, block_target - prev_overlap)
+            prefetched_current = len(carry_frames)
+            prev_overlap = len(prev_tail_frames)
+            base_needed = max(0, block_target - prefetched_current)
             read_target = base_needed + next_overlap
 
             fresh_frames: list[np.ndarray] = []
@@ -1765,7 +1815,7 @@ def biconv_video_to_files_stream(
 
             if len(fresh_frames) < base_needed:
                 base_needed = len(fresh_frames)
-                block_target = prev_overlap + base_needed
+                block_target = prefetched_current + base_needed
                 next_overlap = 0
 
             current_frames = fresh_frames[:base_needed]
@@ -1779,7 +1829,7 @@ def biconv_video_to_files_stream(
             block_frames = [*carry_frames, *current_frames, *next_carry]
             block_end = block_start + block_target - 1
 
-            ext_start = max(0, block_start - prev_overlap)
+            ext_start = block_start
             ext_end = block_end + len(next_carry)
             ext_start_s, ext_stop_s = frame_range_samples(
                 ext_start,
@@ -1789,9 +1839,7 @@ def biconv_video_to_files_stream(
                 n_samples=None,
             )
             if ext_stop_s <= ext_start_s:
-                expected = max(
-                    1, int(round((ext_end - ext_start + 1) * sr / fps_used))
-                )
+                expected = max(1, int(round((ext_end - ext_start + 1) * sr / fps_used)))
                 chunk = np.zeros((expected, audio.shape[1]), dtype=np.float32)
             else:
                 chunk = audio_chunk_for_interval(
@@ -1812,7 +1860,11 @@ def biconv_video_to_files_stream(
                 if img_sum is None:
                     img_sum = np.zeros_like(arr_f, dtype=np.float32)
                 img_sum += arr_f
-            img_mean = img_sum / len(block_frames) if img_sum is not None else np.zeros((1,), dtype=np.float32)
+            img_mean = (
+                img_sum / len(block_frames)
+                if img_sum is not None
+                else np.zeros((1,), dtype=np.float32)
+            )
 
             block_proc_frames_u8: list[np.ndarray] = []
             if serial_mode == "parallel":
@@ -1946,7 +1998,8 @@ def biconv_video_to_files_stream(
 
             if overlap_head > 0:
                 cur_head = base_frames[:overlap_head]
-                _write_frames(_blend_frames(prev_tail_frames, cur_head, mode=block_crossover))
+                _write_frames(prev_tail_frames)
+                _write_frames(cur_head)
             elif prev_overlap == 0 and prev_tail_frames:
                 _write_frames(prev_tail_frames)
                 prev_tail_frames = []
@@ -1974,16 +2027,16 @@ def biconv_video_to_files_stream(
                 return aud_proc_out[local_seg_start:local_seg_stop, :]
 
             if overlap_head > 0:
-                cur_head_audio = _audio_slice(block_start, block_start + overlap_head - 1)
-                if prev_tail_audio is not None:
-                    blend_len = min(prev_tail_audio.shape[0], cur_head_audio.shape[0])
-                    w_prev, w_cur = crossfade_weights(blend_len, block_crossover)
-                    w_prev = w_prev[:, None]
-                    w_cur = w_cur[:, None]
-                    blended = prev_tail_audio[:blend_len, :] * w_prev + cur_head_audio[:blend_len, :] * w_cur
-                    _write_audio(blended.astype(np.float32))
-                elif cur_head_audio.size > 0:
-                    _write_audio(cur_head_audio)
+                cur_head_audio = _audio_slice(
+                    block_start, block_start + overlap_head - 1
+                )
+                transition_audio = _blend_boundary_audio_preserve_length(
+                    prev_tail_audio,
+                    cur_head_audio,
+                    mode=block_crossover,
+                )
+                if transition_audio.size > 0:
+                    _write_audio(transition_audio)
             elif overlap_head == 0 and prev_tail_audio is not None:
                 _write_audio(prev_tail_audio)
 
@@ -2017,7 +2070,12 @@ def biconv_video_to_files_stream(
             audio_writer.close()
 
     # mux if requested
-    if mux_output and out_video_p is not None and temp_video is not None and temp_audio is not None:
+    if (
+        mux_output
+        and out_video_p is not None
+        and temp_video is not None
+        and temp_audio is not None
+    ):
         if not _ffmpeg_available():
             raise RuntimeError("mux_output requested but ffmpeg not available on PATH")
         metadata_settings = {
