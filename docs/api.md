@@ -562,6 +562,16 @@ from exconv.conv1d import (
 
 ```
 
+`AudioConvolutionResult` is the structured return item used by
+`convolution_family`. It records which inputs produced a generated result:
+
+| Field | Description |
+|-------|-------------|
+| `kind` | `"self"`, `"pair"`, or `"multi"`. |
+| `indices` | Input indices used by this result. |
+| `names` | Input labels aligned with `indices`. |
+| `audio` | The generated `Audio` output. |
+
 
 
 ### 3.1 `Audio` container

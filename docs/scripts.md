@@ -163,6 +163,13 @@ and `docs/design.md` (video block and cross-modal sections).
   | `--s2i-chroma-strength` | `0.05` | Safe-color strength. |
   | `--s2i-chroma-clip` | `0.1` | Safe-color clip radius. |
 
+  Practical color smoke presets:
+  - Default safe color: `--s2i-mode mid-side --s2i-colorspace color`
+    (safe color is on, strength `0.05`, clip `0.1`).
+  - Luma reference: `--s2i-colorspace luma`.
+  - Strong color stress: `--s2i-colorspace color --s2i-chroma-strength 1.0 --s2i-chroma-clip 0.35`.
+  - Unsafe comparison: `--s2i-colorspace color --s2i-unsafe-color --s2i-chroma-strength 1.0`.
+
   | Image->sound (i2s) | Default | What it does |
   | --- | --- | --- |
   | `--i2s-mode` | `radial` | Image->sound impulse (`flat`, `hist`, `radial`). |

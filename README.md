@@ -445,6 +445,11 @@ Audio options:
 | `--audio-treble-sharpen` | float | Sharpen high-frequency magnitudes. |
 | `--audio-high-gain-db` | dB | Add frequency-dependent high-frequency gain. |
 
+Advanced spectral controls also include `--audio-spectral-crossover`,
+`--audio-spectral-transition`, `--audio-phase-low`, `--audio-phase-high`,
+`--audio-spectral-contrast`, `--audio-spectral-blur-bins`,
+`--audio-spectral-max-gain-db`, and `--audio-spectral-operands`.
+
 Spectral processing is documented in
 [`docs/audio_spectral_processing.md`](docs/audio_spectral_processing.md),
 including Python examples, CLI recipes, and control descriptions.
