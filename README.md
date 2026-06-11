@@ -419,7 +419,8 @@ exconv folderbatch mlejn \
 ```
 
 Inputs are read from `<root>/input/audio/<project>/` and, if present,
-`<root>/input/img/<project>/`. Normal audio batch outputs are written to
+`<root>/input/img/<project>/`. Add `--recursive` to include subfolders under
+those project input folders. Normal audio batch outputs are written to
 `<root>/output/audio/<project>/{self,pair}/`. The `multi/` output is created
 only when explicitly requested.
 
@@ -430,10 +431,23 @@ Audio options:
 | `--audio-mode` | `full`, `same-first`, `same-center` | Linear size policy for self, pair and linear multi convolution. |
 | `--audio-order` | integer >= 1 | Self-convolution order. |
 | `--audio-circular` | flag | Use circular convolution for all audio outputs. |
+| `--audio-no-pairs` | flag | Skip unordered pair convolution outputs. |
+| `--audio-max-pairs` | integer >= 0 | Hard ceiling for sampled unordered pairs; `0` disables the ceiling. |
+| `--audio-pair-sample-factor` | float > 0 | Target sampled pair count as `factor * file_count`; set high enough with `--audio-max-pairs 0` to run all pairs. |
+| `--audio-pair-seed` | integer | Random seed for balanced pair sampling. |
 | `--audio-multi` | flag | Also write one all-files N-fold convolution into `multi/`. |
 | `--audio-multi-circular` | flag | Enable the all-files N-fold output and use circular convolution for it; useful for long recordings. |
 | `--audio-normalize` | `rms`, `peak`, `none` | Output normalization. |
 | `--audio-subtype` | e.g. `PCM_16`, `PCM_24`, `FLOAT` | libsndfile output subtype. |
+| `--audio-spectral` | flag | Enable creative spectral shaping around FFT multiplication. Neutral by itself. |
+| `--audio-low-preserve` | `0..1` | Blend low bins back toward the reference input spectrum. |
+| `--audio-bass-blur` | `0..1` | Blur low-frequency magnitudes before inverse FFT. |
+| `--audio-treble-sharpen` | float | Sharpen high-frequency magnitudes. |
+| `--audio-high-gain-db` | dB | Add frequency-dependent high-frequency gain. |
+
+Spectral processing is documented in
+[`docs/audio_spectral_processing.md`](docs/audio_spectral_processing.md),
+including Python examples, CLI recipes, and control descriptions.
 
 Sound->image and animation options are documented in
 [`docs/scripts.md`](docs/scripts.md).
@@ -444,6 +458,7 @@ Sound->image and animation options are documented in
 
 - **Design notes**: [`docs/design.md`](docs/design.md) — rationale, modes,
   color handling, cross-modal mapping.
+- **Audio spectral processing**: [`docs/audio_spectral_processing.md`](docs/audio_spectral_processing.md) - optional bass-preserving and treble-enhancing spectrum tools.
 - **API reference**: [`docs/api.md`](docs/api.md) — signatures and parameter
   semantics.
 - **CLI + scripts**: [`docs/scripts.md`](docs/scripts.md) - batch subcommands and legacy helpers.

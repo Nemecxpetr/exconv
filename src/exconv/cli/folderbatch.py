@@ -3,44 +3,52 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
+import random
+import subprocess
 import sys
 from itertools import combinations
 from pathlib import Path
-import subprocess
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import imageio.v3 as iio
+import numpy as np
 
-from exconv.io import (
-    read_audio,
-    write_audio,
-    read_image,
-    write_image,
-    as_uint8,
-    write_video_frames,
-    upscale_image,
-)
-from exconv.io.image import UPSCALE_METHODS
-from exconv.conv1d import (
-    Audio,
-    auto_convolve as audio_auto_convolve,
-    pair_convolve as audio_pair_convolve,
-    multi_convolve as audio_multi_convolve,
-)
-from exconv.xmodal.sound2image import spectral_sculpt
 from exconv.cli.settings import (
     add_settings_args,
-    strip_settings_args,
-    load_settings,
-    select_settings,
     apply_settings_to_parser,
+    load_settings,
     parse_explicit_args,
+    save_settings,
+    select_settings,
     serialize_args,
     serialize_explicit_args,
-    save_settings,
+    strip_settings_args,
 )
-
+from exconv.conv1d import (
+    Audio,
+    AudioSpectralProcessing,
+)
+from exconv.conv1d import (
+    auto_convolve as audio_auto_convolve,
+)
+from exconv.conv1d import (
+    multi_convolve as audio_multi_convolve,
+)
+from exconv.conv1d import (
+    pair_convolve as audio_pair_convolve,
+)
+from exconv.io import (
+    as_uint8,
+    read_audio,
+    read_image,
+    upscale_image,
+    write_audio,
+    write_image,
+    write_video_frames,
+)
+from exconv.io.image import UPSCALE_METHODS
+from exconv.xmodal.sound2image import spectral_sculpt
 
 AUDIO_EXTS = (".wav", ".flac", ".aiff", ".aif", ".ogg", ".mp3")
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
@@ -50,17 +58,31 @@ def _path(p: str | Path) -> Path:
     return Path(p).expanduser().resolve()
 
 
-def _find_files(root: Path, exts: Tuple[str, ...]) -> List[Path]:
+def _find_files(
+    root: Path, exts: Tuple[str, ...], *, recursive: bool = False
+) -> List[Path]:
     if not root.exists():
         return []
-    return [p for p in sorted(root.iterdir()) if p.is_file() and p.suffix.lower() in exts]
+    candidates = root.rglob("*") if recursive else root.iterdir()
+    return [p for p in sorted(candidates) if p.is_file() and p.suffix.lower() in exts]
+
+
+def _output_stem(root: Path, p: Path) -> str:
+    try:
+        rel = p.relative_to(root)
+    except ValueError:
+        return p.stem
+    parts = list(rel.with_suffix("").parts)
+    return "__".join(parts) if len(parts) > 1 else p.stem
 
 
 def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
-def _multi_output_name(stems: List[str], mode_label: str, max_stem_chars: int = 140) -> str:
+def _multi_output_name(
+    stems: List[str], mode_label: str, max_stem_chars: int = 140
+) -> str:
     joined = "__MULTI__".join(stems)
     suffix = f"__{mode_label}.wav"
     if len(joined) + len(suffix) <= max_stem_chars:
@@ -71,6 +93,85 @@ def _multi_output_name(stems: List[str], mode_label: str, max_stem_chars: int = 
     prefix_budget = max(16, max_stem_chars - len(suffix) - 32)
     prefix = first[:prefix_budget].rstrip(" ._-") or "audio"
     return f"{prefix}__MULTI_{len(stems)}files_{digest}{suffix}"
+
+
+def _add_pair(
+    pairs: List[Tuple[int, int]],
+    seen: set[Tuple[int, int]],
+    degrees: List[int],
+    i: int,
+    j: int,
+) -> bool:
+    if i == j:
+        return False
+    edge = (i, j) if i < j else (j, i)
+    if edge in seen:
+        return False
+    seen.add(edge)
+    pairs.append(edge)
+    degrees[edge[0]] += 1
+    degrees[edge[1]] += 1
+    return True
+
+
+def _balanced_random_pairs(
+    n_items: int,
+    target_count: int,
+    *,
+    seed: Optional[int] = None,
+) -> List[Tuple[int, int]]:
+    """Sample unique pairs while keeping per-item pair counts nearly even."""
+    if n_items < 2 or target_count <= 0:
+        return []
+
+    all_pair_count = n_items * (n_items - 1) // 2
+    if target_count >= all_pair_count:
+        return list(combinations(range(n_items), 2))
+
+    rng = random.Random(seed)
+    pairs: List[Tuple[int, int]] = []
+    seen: set[Tuple[int, int]] = set()
+    degrees = [0] * n_items
+
+    if target_count >= n_items and n_items > 2:
+        order = list(range(n_items))
+        rng.shuffle(order)
+        for pos, i in enumerate(order):
+            _add_pair(pairs, seen, degrees, i, order[(pos + 1) % n_items])
+
+    while len(pairs) < target_count:
+        min_degree = min(degrees)
+        low_degree_items = [
+            i for i, degree in enumerate(degrees) if degree == min_degree
+        ]
+        rng.shuffle(low_degree_items)
+
+        added = False
+        for i in low_degree_items:
+            candidates = []
+            for j in range(n_items):
+                edge = (i, j) if i < j else (j, i)
+                if i != j and edge not in seen:
+                    candidates.append(j)
+            if not candidates:
+                continue
+
+            partner_degree = min(degrees[j] for j in candidates)
+            partners = [j for j in candidates if degrees[j] == partner_degree]
+            if _add_pair(pairs, seen, degrees, i, rng.choice(partners)):
+                added = True
+                break
+
+        if not added:
+            remaining = [
+                edge for edge in combinations(range(n_items), 2) if edge not in seen
+            ]
+            if not remaining:
+                break
+            i, j = rng.choice(remaining)
+            _add_pair(pairs, seen, degrees, i, j)
+
+    return pairs
 
 
 def _ffmpeg_available() -> bool:
@@ -120,6 +221,41 @@ def _should_upscale(scale: float, method: str) -> bool:
         return True
 
 
+def _build_audio_spectral_processing(
+    *,
+    enabled: bool,
+    crossover_hz: float,
+    transition_hz: float,
+    bass_blur: float,
+    treble_sharpen: float,
+    high_gain_db: float,
+    contrast: float,
+    low_preserve: float,
+    phase_low: float,
+    phase_high: float,
+    blur_bins: int,
+    max_gain_db: float,
+    process_operands: bool,
+) -> AudioSpectralProcessing | None:
+    cfg = AudioSpectralProcessing(
+        crossover_hz=crossover_hz,
+        transition_hz=transition_hz,
+        bass_blur=bass_blur,
+        treble_sharpen=treble_sharpen,
+        high_gain_db=high_gain_db,
+        contrast=contrast,
+        low_preserve=low_preserve,
+        phase_low=phase_low,
+        phase_high=phase_high,
+        blur_bins=blur_bins,
+        max_gain_db=max_gain_db,
+        process_operands=process_operands,
+    )
+    if enabled or not cfg.is_neutral() or process_operands:
+        return cfg
+    return None
+
+
 def process_audio_batch(
     audio_dir: Path,
     out_self_dir: Path,
@@ -131,11 +267,17 @@ def process_audio_batch(
     circular: bool = False,
     include_multi: bool = False,
     multi_circular: bool = False,
+    include_pairs: bool = True,
+    max_pairs: int = 10000,
+    pair_sample_factor: float = 1.1,
+    pair_seed: Optional[int] = 0,
     normalize: str = "rms",
     subtype: str = "PCM_16",
+    recursive: bool = False,
+    spectral_processing: AudioSpectralProcessing | None = None,
 ) -> None:
     """Self + pair convolution, plus optional all-files multi convolution."""
-    audio_files = _find_files(audio_dir, AUDIO_EXTS)
+    audio_files = _find_files(audio_dir, AUDIO_EXTS, recursive=recursive)
     if not audio_files:
         print(f"[audio] No audio files found in {audio_dir}")
         return
@@ -150,7 +292,7 @@ def process_audio_batch(
     for p in audio_files:
         samples, sr = read_audio(p, dtype="float32", always_2d=False)
         audio_objs.append(Audio(samples=samples, sr=sr))
-        print(f"  loaded {p.name} (sr={sr}, shape={samples.shape})")
+        print(f"  loaded {p.relative_to(audio_dir)} (sr={sr}, shape={samples.shape})")
 
     print("[audio] Running self-convolution...")
     for p, a in zip(audio_files, audio_objs):
@@ -160,39 +302,78 @@ def process_audio_batch(
             circular=circular,
             normalize=normalize,
             order=order,
+            spectral_processing=spectral_processing,
         )
-        out_name = f"{p.stem}__SELF_o{order}.wav"
+        out_name = f"{_output_stem(audio_dir, p)}__SELF_o{order}.wav"
         out_path = out_self_dir / out_name
         write_audio(out_path, out.samples, out.sr, subtype=subtype)
         print(f"    self -> {out_path}")
 
-    print("[audio] Running pair-convolution (unordered pairs)...")
-    for (i, a_i), (j, a_j) in combinations(enumerate(audio_objs), 2):
-        p_i = audio_files[i]
-        p_j = audio_files[j]
+    pair_count = len(audio_objs) * (len(audio_objs) - 1) // 2
+    target_pairs = min(
+        pair_count,
+        max(0, int(math.ceil(len(audio_objs) * pair_sample_factor))),
+    )
+    if max_pairs > 0:
+        target_pairs = min(target_pairs, max_pairs)
 
-        if a_i.sr != a_j.sr:
+    selected_pairs: List[Tuple[int, int]] = []
+    if not include_pairs:
+        print("[audio] Skipping pair-convolution (--audio-no-pairs).")
+    elif pair_count <= target_pairs:
+        selected_pairs = list(combinations(range(len(audio_objs)), 2))
+        print(f"[audio] Running pair-convolution ({pair_count} unordered pairs)...")
+    else:
+        selected_pairs = _balanced_random_pairs(
+            len(audio_objs),
+            target_pairs,
+            seed=pair_seed,
+        )
+        print(
+            f"[audio] Running pair-convolution sample: {len(selected_pairs)} of "
+            f"{pair_count} unordered pairs (balanced random, seed={pair_seed})."
+        )
+
+    if include_pairs:
+        for i, j in selected_pairs:
+            a_i = audio_objs[i]
+            a_j = audio_objs[j]
+            p_i = audio_files[i]
+            p_j = audio_files[j]
+
+            if a_i.sr != a_j.sr:
+                print(
+                    f"    [skip] {p_i.relative_to(audio_dir)} - "
+                    f"{p_j.relative_to(audio_dir)} (sr mismatch {a_i.sr} vs {a_j.sr})"
+                )
+                continue
+
+            try:
+                out = audio_pair_convolve(
+                    a_i,
+                    a_j,
+                    mode=mode,
+                    circular=circular,
+                    normalize=normalize,
+                    spectral_processing=spectral_processing,
+                )
+            except Exception as exc:
+                print(
+                    f"    [error] {p_i.relative_to(audio_dir)} - "
+                    f"{p_j.relative_to(audio_dir)}: {exc}"
+                )
+                continue
+
+            out_name = (
+                f"{_output_stem(audio_dir, p_i)}__PAIR__"
+                f"{_output_stem(audio_dir, p_j)}.wav"
+            )
+            out_path = out_pair_dir / out_name
+            write_audio(out_path, out.samples, out.sr, subtype=subtype)
             print(
-                f"    [skip] {p_i.name} - {p_j.name} (sr mismatch {a_i.sr} vs {a_j.sr})"
+                f"    pair {p_i.relative_to(audio_dir)} - "
+                f"{p_j.relative_to(audio_dir)} -> {out_path}"
             )
-            continue
-
-        try:
-            out = audio_pair_convolve(
-                a_i,
-                a_j,
-                mode=mode,
-                circular=circular,
-                normalize=normalize,
-            )
-        except Exception as exc:
-            print(f"    [error] {p_i.name} - {p_j.name}: {exc}")
-            continue
-
-        out_name = f"{p_i.stem}__PAIR__{p_j.stem}.wav"
-        out_path = out_pair_dir / out_name
-        write_audio(out_path, out.samples, out.sr, subtype=subtype)
-        print(f"    pair {p_i.name} - {p_j.name} -> {out_path}")
 
     if not include_multi:
         print("[audio] Skipping multi-convolution (use --audio-multi to enable).")
@@ -200,7 +381,7 @@ def process_audio_batch(
 
     print("[audio] Running multi-convolution (all files combined)...")
     if len(audio_objs) > 1:
-        stems = [p.stem for p in audio_files]
+        stems = [_output_stem(audio_dir, p) for p in audio_files]
         multi_mode_label = "circular" if multi_circular else mode
         try:
             out = audio_multi_convolve(
@@ -208,6 +389,7 @@ def process_audio_batch(
                 mode=mode,
                 circular=multi_circular,
                 normalize=normalize,
+                spectral_processing=spectral_processing,
             )
             out_name = _multi_output_name(stems, multi_mode_label)
             out_path = out_multi_dir / out_name
@@ -217,13 +399,16 @@ def process_audio_batch(
             if multi_circular:
                 print("    [error] multi-convolution ran out of memory")
                 return
-            print("    [warn] linear multi-convolution ran out of memory; retrying circular")
+            print(
+                "    [warn] linear multi-convolution ran out of memory; retrying circular"
+            )
             try:
                 out = audio_multi_convolve(
                     audio_objs,
                     mode=mode,
                     circular=True,
                     normalize=normalize,
+                    spectral_processing=spectral_processing,
                 )
                 out_name = _multi_output_name(stems, "circular")
                 out_path = out_multi_dir / out_name
@@ -253,16 +438,17 @@ def process_sound2image_batch(
     upscale: float = 1.0,
     upscale_method: str = "lanczos",
     upscale_model: str | None = None,
+    recursive: bool = False,
 ) -> None:
     """
     For every image in image_dir and every audio in audio_dir, run spectral_sculpt.
     """
-    audio_files = _find_files(audio_dir, AUDIO_EXTS)
+    audio_files = _find_files(audio_dir, AUDIO_EXTS, recursive=recursive)
     if not audio_files:
         print(f"[sound2image] No audio files found in {audio_dir} - skipping.")
         return
 
-    image_files = _find_files(image_dir, IMAGE_EXTS)
+    image_files = _find_files(image_dir, IMAGE_EXTS, recursive=recursive)
     if not image_files:
         print(f"[sound2image] No image files found in {image_dir} - skipping.")
         return
@@ -277,7 +463,7 @@ def process_sound2image_batch(
     for p in audio_files:
         a, sr = read_audio(p, dtype="float32", always_2d=True)
         audio_data.append((p, a, sr))
-        print(f"  loaded audio {p.name} (sr={sr}, shape={a.shape})")
+        print(f"  loaded audio {p.relative_to(audio_dir)} (sr={sr}, shape={a.shape})")
 
     anim_paths: Dict[Path, List[Path]] = {}
     anim_dir = out_dir / "animations"
@@ -287,7 +473,7 @@ def process_sound2image_batch(
 
     for img_path in image_files:
         img = read_image(img_path, mode="RGB", dtype="uint8")
-        print(f"  loaded image {img_path.name} (shape={img.shape})")
+        print(f"  loaded image {img_path.relative_to(image_dir)} (shape={img.shape})")
 
         for a_path, a, sr in audio_data:
             try:
@@ -311,7 +497,10 @@ def process_sound2image_batch(
                     method=upscale_method,
                     model=upscale_model,
                 )
-            out_name = f"{img_path.stem}__S2I__{a_path.stem}.png"
+            out_name = (
+                f"{_output_stem(image_dir, img_path)}__S2I__"
+                f"{_output_stem(audio_dir, a_path)}.png"
+            )
             out_path = out_dir / out_name
             write_image(out_path, out_u8)
             print(f"    sound2image {img_path.name} - {a_path.name} -> {out_path}")
@@ -331,7 +520,7 @@ def process_sound2image_batch(
         if not frame_paths:
             continue
         frames = [iio.imread(str(p)) for p in frame_paths]
-        stem = a_path.stem
+        stem = _output_stem(audio_dir, a_path)
         if write_gif:
             out_gif = anim_dir / f"{stem}__S2I.gif"
             iio.imwrite(
@@ -371,6 +560,11 @@ def _add_folderbatch_args(parser: argparse.ArgumentParser) -> None:
         default="samples",
         help='Root folder (default: "samples").',
     )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Recurse into subfolders under the project input folders.",
+    )
 
     g_audio = parser.add_argument_group("audio-convolution options")
     g_audio.add_argument(
@@ -404,6 +598,34 @@ def _add_folderbatch_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     g_audio.add_argument(
+        "--audio-no-pairs",
+        action="store_true",
+        help="Skip unordered pair convolution outputs.",
+    )
+    g_audio.add_argument(
+        "--audio-max-pairs",
+        type=int,
+        default=10000,
+        help=(
+            "Hard ceiling for sampled unordered pair convolutions. "
+            "Use 0 to disable this ceiling."
+        ),
+    )
+    g_audio.add_argument(
+        "--audio-pair-sample-factor",
+        type=float,
+        default=1.1,
+        help=(
+            "Target random pair sample as factor * file_count when all pairs are too many."
+        ),
+    )
+    g_audio.add_argument(
+        "--audio-pair-seed",
+        type=int,
+        default=0,
+        help="Random seed for balanced pair sampling.",
+    )
+    g_audio.add_argument(
         "--audio-normalize",
         choices=["rms", "peak", "none"],
         default="rms",
@@ -413,6 +635,82 @@ def _add_folderbatch_args(parser: argparse.ArgumentParser) -> None:
         "--audio-subtype",
         default="PCM_16",
         help='libsndfile subtype for writing audio (e.g. "PCM_16", "PCM_24", "FLOAT").',
+    )
+    g_audio.add_argument(
+        "--audio-spectral",
+        action="store_true",
+        help="Enable creative spectral shaping around audio FFT multiplication.",
+    )
+    g_audio.add_argument(
+        "--audio-spectral-crossover",
+        type=float,
+        default=80.0,
+        help="Spectral bass/treble transition start in Hz.",
+    )
+    g_audio.add_argument(
+        "--audio-spectral-transition",
+        type=float,
+        default=400.0,
+        help="Spectral bass/treble transition end in Hz.",
+    )
+    g_audio.add_argument(
+        "--audio-bass-blur",
+        type=float,
+        default=0.0,
+        help="0..1 low-frequency magnitude blur amount.",
+    )
+    g_audio.add_argument(
+        "--audio-treble-sharpen",
+        type=float,
+        default=0.0,
+        help="High-frequency unsharp-mask amount.",
+    )
+    g_audio.add_argument(
+        "--audio-high-gain-db",
+        type=float,
+        default=0.0,
+        help="Frequency-dependent high-shelf gain in dB.",
+    )
+    g_audio.add_argument(
+        "--audio-spectral-contrast",
+        type=float,
+        default=1.0,
+        help="High-frequency spectral contrast; 1.0 is neutral.",
+    )
+    g_audio.add_argument(
+        "--audio-low-preserve",
+        type=float,
+        default=0.0,
+        help="0..1 blend low bins back to the reference input spectrum.",
+    )
+    g_audio.add_argument(
+        "--audio-phase-low",
+        type=float,
+        default=1.0,
+        help="Kernel phase contribution below crossover; 0 preserves reference phase.",
+    )
+    g_audio.add_argument(
+        "--audio-phase-high",
+        type=float,
+        default=1.0,
+        help="Kernel phase contribution above transition.",
+    )
+    g_audio.add_argument(
+        "--audio-spectral-blur-bins",
+        type=int,
+        default=3,
+        help="Gaussian blur radius in rFFT bins for blur/sharpen/contrast.",
+    )
+    g_audio.add_argument(
+        "--audio-spectral-max-gain-db",
+        type=float,
+        default=24.0,
+        help="Clamp spectral magnitude growth relative to the unprocessed product.",
+    )
+    g_audio.add_argument(
+        "--audio-spectral-operands",
+        action="store_true",
+        help="Shape each operand spectrum before multiplication instead of shaping the product.",
     )
 
     g_s2i = parser.add_argument_group("sound2image options")
@@ -515,6 +813,33 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
     print(f"[config] out_sound2image={out_s2i}")
 
     if audio_dir.exists():
+        if args.audio_max_pairs < 0:
+            raise SystemExit("--audio-max-pairs must be >= 0")
+        if args.audio_pair_sample_factor <= 0:
+            raise SystemExit("--audio-pair-sample-factor must be > 0")
+        if args.audio_spectral_crossover < 0:
+            raise SystemExit("--audio-spectral-crossover must be >= 0")
+        if args.audio_spectral_transition < args.audio_spectral_crossover:
+            raise SystemExit(
+                "--audio-spectral-transition must be >= --audio-spectral-crossover"
+            )
+        if args.audio_spectral_blur_bins < 0:
+            raise SystemExit("--audio-spectral-blur-bins must be >= 0")
+        spectral_processing = _build_audio_spectral_processing(
+            enabled=args.audio_spectral,
+            crossover_hz=args.audio_spectral_crossover,
+            transition_hz=args.audio_spectral_transition,
+            bass_blur=args.audio_bass_blur,
+            treble_sharpen=args.audio_treble_sharpen,
+            high_gain_db=args.audio_high_gain_db,
+            contrast=args.audio_spectral_contrast,
+            low_preserve=args.audio_low_preserve,
+            phase_low=args.audio_phase_low,
+            phase_high=args.audio_phase_high,
+            blur_bins=args.audio_spectral_blur_bins,
+            max_gain_db=args.audio_spectral_max_gain_db,
+            process_operands=args.audio_spectral_operands,
+        )
         process_audio_batch(
             audio_dir,
             out_audio_self,
@@ -525,8 +850,14 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
             circular=args.audio_circular,
             include_multi=include_audio_multi,
             multi_circular=args.audio_multi_circular or args.audio_circular,
+            include_pairs=not args.audio_no_pairs,
+            max_pairs=args.audio_max_pairs,
+            pair_sample_factor=args.audio_pair_sample_factor,
+            pair_seed=args.audio_pair_seed,
             normalize=args.audio_normalize,
             subtype=args.audio_subtype,
+            recursive=args.recursive,
+            spectral_processing=spectral_processing,
         )
     else:
         print(f"[audio] Audio directory {audio_dir} does not exist - skipping.")
@@ -542,7 +873,11 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
                 animate_audio = args.s2i_animate_format in {"mp4", "both"}
             if animate_audio and args.s2i_animate_format == "gif":
                 print("[warn] --s2i-animate-audio has no effect when format is gif.")
-            if animate_audio and args.s2i_animate_format in {"mp4", "both"} and not _ffmpeg_available():
+            if (
+                animate_audio
+                and args.s2i_animate_format in {"mp4", "both"}
+                and not _ffmpeg_available()
+            ):
                 raise SystemExit("ffmpeg is required for --s2i-animate-audio.")
         else:
             animate_audio = False
@@ -562,6 +897,7 @@ def _cmd_folderbatch(args: argparse.Namespace) -> int:
             upscale=args.s2i_upscale,
             upscale_method=args.s2i_upscale_method,
             upscale_model=args.s2i_upscale_model,
+            recursive=args.recursive,
         )
     else:
         if not img_dir.exists():
@@ -599,7 +935,9 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
-    cleaned_argv, settings_path, save_path, update_settings, show_settings = strip_settings_args(raw_argv)
+    cleaned_argv, settings_path, save_path, update_settings, show_settings = (
+        strip_settings_args(raw_argv)
+    )
     if update_settings:
         if not save_path:
             raise SystemExit("--update-settings requires --save-settings <path>.")
@@ -613,7 +951,9 @@ def main(argv: list[str] | None = None) -> int:
         }
         patch = serialize_explicit_args(args, parser, exclude=exclude)
         if not patch:
-            raise SystemExit("--update-settings requires at least one option to update.")
+            raise SystemExit(
+                "--update-settings requires at least one option to update."
+            )
         save_path_obj = Path(save_path)
         base: dict[str, object] = {}
         if save_path_obj.exists():

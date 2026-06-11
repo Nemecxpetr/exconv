@@ -5,51 +5,57 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, Dict, Iterable
+from typing import Dict, Iterable, Optional
 
-import numpy as np
 import imageio.v3 as iio
+import numpy as np
 
-from exconv import __version__  # version helper :contentReference[oaicite:0]{index=0}
+from exconv import __version__
 from exconv.cli.folderbatch import register_folderbatch_subcommand
-from exconv.cli.video_biconv import register_video_biconv_subcommand
-from exconv.cli.video_folderbatch import register_video_folderbatch_subcommand
 from exconv.cli.settings import (
     add_settings_args,
-    strip_settings_args,
-    detect_command,
-    load_settings,
-    select_settings,
     apply_settings_to_parser,
+    detect_command,
+    find_subparser,
+    load_settings,
     parse_explicit_args,
+    save_settings,
+    select_settings,
     serialize_args,
     serialize_explicit_args,
-    save_settings,
-    find_subparser,
+    strip_settings_args,
 )
-from exconv.io import (
-    read_audio,
-    read_segment,
-    write_audio,
-    read_image,
-    write_image,
-    as_uint8,
-    write_video_frames,
-    upscale_image,
-)  # audio/image IO 
-from exconv.io.image import UPSCALE_METHODS
-from exconv.conv1d import Audio, auto_convolve as audio_auto_convolve  # :contentReference[oaicite:2]{index=2}
+from exconv.cli.video_biconv import register_video_biconv_subcommand
+from exconv.cli.video_folderbatch import register_video_folderbatch_subcommand
+from exconv.conv1d import (
+    Audio,
+    AudioSpectralProcessing,
+)
+from exconv.conv1d import (
+    auto_convolve as audio_auto_convolve,
+)
 from exconv.conv2d import (
+    gaussian_2d,
     image_auto_convolve,
     image_pair_convolve,
-    gaussian_2d,
-)  # 2D conv + kernels 
-from exconv.xmodal.sound2image import spectral_sculpt  # :contentReference[oaicite:4]{index=4}
-
+)
+from exconv.io import (
+    as_uint8,
+    read_audio,
+    read_image,
+    read_segment,
+    upscale_image,
+    write_audio,
+    write_image,
+    write_video_frames,
+)
+from exconv.io.image import UPSCALE_METHODS
+from exconv.xmodal.sound2image import spectral_sculpt
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _path(p: str | Path) -> Path:
     return Path(p).expanduser().resolve()
@@ -58,11 +64,15 @@ def _path(p: str | Path) -> Path:
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif")
 
 
-def _iter_image_files(input_dir: Path, pattern: str | None, recursive: bool) -> list[Path]:
+def _iter_image_files(
+    input_dir: Path, pattern: str | None, recursive: bool
+) -> list[Path]:
     if not input_dir.exists():
         return []
     if pattern:
-        globber: Iterable[Path] = input_dir.rglob(pattern) if recursive else input_dir.glob(pattern)
+        globber: Iterable[Path] = (
+            input_dir.rglob(pattern) if recursive else input_dir.glob(pattern)
+        )
     else:
         globber = input_dir.rglob("*") if recursive else input_dir.glob("*")
     files = [p for p in globber if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
@@ -123,7 +133,9 @@ def _parse_gaussian_kernel_spec(spec: str) -> np.ndarray:
     kind = kind.strip().lower()
 
     if kind != "gaussian":
-        raise ValueError(f"Unsupported kernel kind {kind!r}; only 'gaussian' is supported for now.")
+        raise ValueError(
+            f"Unsupported kernel kind {kind!r}; only 'gaussian' is supported for now."
+        )
 
     params: Dict[str, str] = {}
     if param_str:
@@ -141,7 +153,9 @@ def _parse_gaussian_kernel_spec(spec: str) -> np.ndarray:
 
     sigma_str = params.get("sigma")
     if sigma_str is None:
-        raise ValueError("Gaussian kernel requires 'sigma' (e.g. 'gaussian:sigma=2.0').")
+        raise ValueError(
+            "Gaussian kernel requires 'sigma' (e.g. 'gaussian:sigma=2.0')."
+        )
 
     sigma = float(sigma_str)
     radius = params.get("radius")
@@ -150,7 +164,9 @@ def _parse_gaussian_kernel_spec(spec: str) -> np.ndarray:
     radius_val: Optional[int] = int(radius) if radius is not None else None
     truncate_val: float = float(truncate) if truncate is not None else 3.0
 
-    return gaussian_2d(sigma=sigma, radius=radius_val, truncate=truncate_val, normalize=True)
+    return gaussian_2d(
+        sigma=sigma, radius=radius_val, truncate=truncate_val, normalize=True
+    )
 
 
 def _should_upscale(args: argparse.Namespace) -> bool:
@@ -180,18 +196,45 @@ def _apply_upscale(img_u8: np.ndarray, args: argparse.Namespace) -> np.ndarray:
 # Subcommand implementations
 # ---------------------------------------------------------------------------
 
+
 def _cmd_audio_auto(args: argparse.Namespace) -> int:
     in_path = _path(args.in_path)
     out_path = _path(args.out_path)
+    if args.spectral_crossover < 0:
+        raise SystemExit("--spectral-crossover must be >= 0")
+    if args.spectral_transition < args.spectral_crossover:
+        raise SystemExit("--spectral-transition must be >= --spectral-crossover")
+    if args.spectral_blur_bins < 0:
+        raise SystemExit("--spectral-blur-bins must be >= 0")
 
     samples, sr = read_audio(in_path, dtype="float32", always_2d=False)
     audio = Audio(samples=samples, sr=sr)
+    spectral_config = AudioSpectralProcessing(
+        crossover_hz=args.spectral_crossover,
+        transition_hz=args.spectral_transition,
+        bass_blur=args.bass_blur,
+        treble_sharpen=args.treble_sharpen,
+        high_gain_db=args.high_gain_db,
+        contrast=args.spectral_contrast,
+        low_preserve=args.low_preserve,
+        phase_low=args.phase_low,
+        phase_high=args.phase_high,
+        blur_bins=args.spectral_blur_bins,
+        max_gain_db=args.spectral_max_gain_db,
+        process_operands=args.spectral_operands,
+    )
+    spectral_processing = (
+        spectral_config
+        if args.spectral or not spectral_config.is_neutral() or args.spectral_operands
+        else None
+    )
     out_audio = audio_auto_convolve(
         audio,
         mode=args.mode,
         circular=args.circular,
         normalize=args.normalize,
         order=args.order,
+        spectral_processing=spectral_processing,
     )
     write_audio(
         out_path,
@@ -233,6 +276,7 @@ def _cmd_img_auto(args: argparse.Namespace) -> int:
     write_image(out_path, out_u8)
     return 0
 
+
 def _cmd_sound2image(args: argparse.Namespace) -> int:
     img_path = _path(args.img)
     audio_path = _path(args.audio)
@@ -271,7 +315,9 @@ def _cmd_animate(args: argparse.Namespace) -> int:
         elif ext in {".mp4", ".mov", ".m4v", ".avi", ".webm", ".mkv"}:
             fmt = "mp4"
         else:
-            raise SystemExit("Could not infer format from output extension; use --format.")
+            raise SystemExit(
+                "Could not infer format from output extension; use --format."
+            )
 
     if fmt == "gif" and args.audio is not None:
         raise SystemExit("--audio is only supported for mp4 output.")
@@ -370,9 +416,8 @@ def _cmd_spectrogram(args: argparse.Namespace) -> int:
     if args.max_seconds is not None and args.max_seconds <= 0:
         raise SystemExit("--max-seconds must be positive")
 
-    from scipy.signal import spectrogram
-
     import matplotlib
+    from scipy.signal import spectrogram
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -438,6 +483,7 @@ def _cmd_spectrogram(args: argparse.Namespace) -> int:
 # Argument parser
 # ---------------------------------------------------------------------------
 
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="exconv",
@@ -498,6 +544,82 @@ def _build_parser() -> argparse.ArgumentParser:
         "--subtype",
         default="PCM_16",
         help='libsndfile subtype for writing (e.g. "PCM_16", "PCM_24", "FLOAT").',
+    )
+    p_audio.add_argument(
+        "--spectral",
+        action="store_true",
+        help="Enable creative spectral shaping around FFT multiplication.",
+    )
+    p_audio.add_argument(
+        "--spectral-crossover",
+        type=float,
+        default=80.0,
+        help="Bass/treble transition start in Hz.",
+    )
+    p_audio.add_argument(
+        "--spectral-transition",
+        type=float,
+        default=400.0,
+        help="Bass/treble transition end in Hz.",
+    )
+    p_audio.add_argument(
+        "--bass-blur",
+        type=float,
+        default=0.0,
+        help="0..1 low-frequency magnitude blur amount.",
+    )
+    p_audio.add_argument(
+        "--treble-sharpen",
+        type=float,
+        default=0.0,
+        help="High-frequency unsharp-mask amount.",
+    )
+    p_audio.add_argument(
+        "--high-gain-db",
+        type=float,
+        default=0.0,
+        help="Frequency-dependent high-shelf gain in dB.",
+    )
+    p_audio.add_argument(
+        "--spectral-contrast",
+        type=float,
+        default=1.0,
+        help="High-frequency spectral contrast; 1.0 is neutral.",
+    )
+    p_audio.add_argument(
+        "--low-preserve",
+        type=float,
+        default=0.0,
+        help="0..1 blend low bins back to the input spectrum.",
+    )
+    p_audio.add_argument(
+        "--phase-low",
+        type=float,
+        default=1.0,
+        help="Kernel phase contribution below crossover.",
+    )
+    p_audio.add_argument(
+        "--phase-high",
+        type=float,
+        default=1.0,
+        help="Kernel phase contribution above transition.",
+    )
+    p_audio.add_argument(
+        "--spectral-blur-bins",
+        type=int,
+        default=3,
+        help="Gaussian blur radius in rFFT bins.",
+    )
+    p_audio.add_argument(
+        "--spectral-max-gain-db",
+        type=float,
+        default=24.0,
+        help="Clamp spectral magnitude growth.",
+    )
+    p_audio.add_argument(
+        "--spectral-operands",
+        action="store_true",
+        help="Shape operand spectra before multiplying.",
     )
     p_audio.set_defaults(func=_cmd_audio_auto)
 
@@ -795,7 +917,9 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_parser()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
-    cleaned_argv, settings_path, save_path, update_settings, show_settings = strip_settings_args(raw_argv)
+    cleaned_argv, settings_path, save_path, update_settings, show_settings = (
+        strip_settings_args(raw_argv)
+    )
     command = detect_command(cleaned_argv)
 
     if update_settings:
@@ -815,7 +939,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         }
         patch = serialize_explicit_args(args, target, exclude=exclude)
         if not patch:
-            raise SystemExit("--update-settings requires at least one option to update.")
+            raise SystemExit(
+                "--update-settings requires at least one option to update."
+            )
         save_path_obj = Path(save_path)
         base: dict[str, object] = {}
         if save_path_obj.exists():

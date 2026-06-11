@@ -1,8 +1,16 @@
 # Changelog
 
 ## Unreleased
+
+## 0.3.0 - 2026-06-11
+- Added audio spectral processing for audio convolution, with Python API and CLI controls.
+- Added folderbatch recursive input handling.
+- Added balanced pair sampling controls for folderbatch, including `--audio-max-pairs`, `--audio-pair-sample-factor`, and `--audio-pair-seed`.
 - Added optional image upscaling (Pillow resampling, OpenCV DNN super-res) with CLI flags for img-auto, sound2image, and folderbatch.
 - Added optional video frame upscaling in the xmodal video pipeline, exposed via video-biconv and video-folderbatch.
+- Added `docs/audio_spectral_processing.md`.
+- Added `scripts/split_audio_golden.py`.
+- Updated tests for the current sound2image API and expanded audio/folderbatch coverage.
 
 ## 0.2.0 - 2026-01-08
 - Added block-based video bi-conv (`--block-size`) so groups of frames share an audio chunk and the audio is driven by the mean image of each block.

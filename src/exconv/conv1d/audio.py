@@ -8,13 +8,13 @@ from typing import Optional
 
 import numpy as np
 
-from exconv.core.fft import linear_freq_multiply, fftnd, ifftnd, next_fast_len_ge
+from exconv.core.fft import fftnd, ifftnd, linear_freq_multiply, next_fast_len_ge
 from exconv.core.norms import apply_normalize
-
 
 __all__ = [
     "Audio",
     "AudioConvolutionResult",
+    "AudioSpectralProcessing",
     "auto_convolve",
     "pair_convolve",
     "multi_convolve",
@@ -34,6 +34,7 @@ class Audio:
     sr : int
         Sampling rate in Hz.
     """
+
     samples: np.ndarray
     sr: int
 
@@ -71,15 +72,53 @@ class AudioConvolutionResult:
     audio : Audio
         The convolved audio output.
     """
+
     kind: str
     indices: tuple[int, ...]
     names: tuple[str, ...]
     audio: Audio
 
 
+@dataclass(frozen=True)
+class AudioSpectralProcessing:
+    """
+    Creative frequency-domain shaping applied around FFT multiplication.
+
+    Supplying this config makes audio convolution intentionally non-pure:
+    spectra can be smoothed, sharpened, tilted, contrast-shaped, phase-limited,
+    or blended back to the dry low-frequency reference. When no config is
+    supplied, the normal mathematical convolution path is used.
+    """
+
+    crossover_hz: float = 80.0
+    transition_hz: float = 400.0
+    bass_blur: float = 0.0
+    treble_sharpen: float = 0.0
+    high_gain_db: float = 0.0
+    contrast: float = 1.0
+    low_preserve: float = 0.0
+    phase_low: float = 1.0
+    phase_high: float = 1.0
+    blur_bins: int = 3
+    max_gain_db: float = 24.0
+    process_operands: bool = False
+
+    def is_neutral(self) -> bool:
+        return (
+            abs(float(self.bass_blur)) <= 1e-12
+            and abs(float(self.treble_sharpen)) <= 1e-12
+            and abs(float(self.high_gain_db)) <= 1e-12
+            and abs(float(self.contrast) - 1.0) <= 1e-12
+            and abs(float(self.low_preserve)) <= 1e-12
+            and abs(float(self.phase_low) - 1.0) <= 1e-12
+            and abs(float(self.phase_high) - 1.0) <= 1e-12
+        )
+
+
 # ---------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------
+
 
 def _ensure_2d(x: np.ndarray) -> np.ndarray:
     """
@@ -93,11 +132,175 @@ def _ensure_2d(x: np.ndarray) -> np.ndarray:
     raise ValueError("Audio samples must be 1D (N,) or 2D (N, C).")
 
 
+def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
+    if edge1 <= edge0:
+        return (x >= edge1).astype(np.float64)
+    t = np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _gaussian_blur_1d(values: np.ndarray, radius: int) -> np.ndarray:
+    radius = int(radius)
+    if radius <= 0 or values.size <= 1:
+        return values
+    sigma = max(radius / 2.0, 1e-6)
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (offsets / sigma) ** 2)
+    kernel /= np.sum(kernel)
+    padded = np.pad(values, (radius, radius), mode="edge")
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def _shape_spectrum_magnitude(
+    spectrum: np.ndarray,
+    freqs: np.ndarray,
+    processing: AudioSpectralProcessing,
+    *,
+    base_mag: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    mag = np.abs(spectrum).astype(np.float64, copy=False)
+    if mag.size == 0:
+        return spectrum
+
+    original_mag = mag.copy()
+    treble = _smoothstep(processing.crossover_hz, processing.transition_hz, freqs)
+    bass = 1.0 - treble
+    blur_radius = max(0, int(processing.blur_bins))
+
+    if processing.bass_blur > 0.0:
+        blurred = _gaussian_blur_1d(mag, blur_radius)
+        amount = np.clip(float(processing.bass_blur), 0.0, 1.0) * bass
+        mag = mag * (1.0 - amount) + blurred * amount
+
+    if processing.treble_sharpen != 0.0:
+        blurred = _gaussian_blur_1d(mag, blur_radius)
+        sharp = np.maximum(
+            mag + float(processing.treble_sharpen) * (mag - blurred), 0.0
+        )
+        mag = mag * (1.0 - treble) + sharp * treble
+
+    if processing.high_gain_db != 0.0:
+        mag *= 10.0 ** ((float(processing.high_gain_db) * treble) / 20.0)
+
+    if abs(float(processing.contrast) - 1.0) > 1e-12:
+        floor = np.finfo(np.float64).eps
+        local = _gaussian_blur_1d(mag, max(blur_radius, 1))
+        contrasted = local * np.power(
+            np.maximum(mag, floor) / np.maximum(local, floor),
+            float(processing.contrast),
+        )
+        mag = mag * (1.0 - treble) + contrasted * treble
+
+    if processing.max_gain_db is not None:
+        max_gain = 10.0 ** (float(processing.max_gain_db) / 20.0)
+        limit_base = (
+            original_mag if base_mag is None else np.asarray(base_mag, dtype=np.float64)
+        )
+        mag = np.minimum(
+            mag, np.maximum(limit_base * max_gain, np.finfo(np.float64).eps)
+        )
+
+    return mag * np.exp(1j * np.angle(spectrum))
+
+
+def _processed_frequency_product(
+    spectra: list[np.ndarray],
+    freqs: np.ndarray,
+    processing: AudioSpectralProcessing,
+) -> np.ndarray:
+    if not spectra:
+        raise ValueError("spectra cannot be empty")
+
+    if processing.process_operands:
+        shaped = [_shape_spectrum_magnitude(S, freqs, processing) for S in spectra]
+        product = np.array(shaped[0], copy=True)
+        for S in shaped[1:]:
+            product *= S
+    else:
+        product = np.array(spectra[0], copy=True)
+        for S in spectra[1:]:
+            product *= S
+        product = _shape_spectrum_magnitude(
+            product, freqs, processing, base_mag=np.abs(product)
+        )
+
+    if (
+        abs(float(processing.phase_low) - 1.0) > 1e-12
+        or abs(float(processing.phase_high) - 1.0) > 1e-12
+    ):
+        treble = _smoothstep(processing.crossover_hz, processing.transition_hz, freqs)
+        phase_amount = (
+            float(processing.phase_low) * (1.0 - treble)
+            + float(processing.phase_high) * treble
+        )
+        phase = np.angle(spectra[0])
+        for S in spectra[1:]:
+            phase += np.angle(S) * phase_amount
+        product = np.abs(product) * np.exp(1j * phase)
+
+    if processing.low_preserve > 0.0:
+        low = 1.0 - _smoothstep(
+            processing.crossover_hz, processing.transition_hz, freqs
+        )
+        amount = np.clip(float(processing.low_preserve), 0.0, 1.0) * low
+        product = product * (1.0 - amount) + spectra[0] * amount
+
+    return product
+
+
+def _spectral_convolve_channel(
+    signals: list[np.ndarray],
+    sr: int,
+    *,
+    mode: str = "same-center",
+    circular: bool = False,
+    processing: AudioSpectralProcessing,
+) -> np.ndarray:
+    lengths = [int(np.asarray(s).shape[0]) for s in signals]
+    if any(length <= 0 for length in lengths):
+        raise ValueError("All signals must contain at least one sample")
+
+    if circular:
+        fft_len = lengths[0]
+        true_len = fft_len
+        start = 0
+        out_len = fft_len
+    else:
+        if mode not in ("full", "same-first", "same-center"):
+            raise ValueError(f"Unknown mode {mode!r}")
+        true_len = sum(lengths) - (len(lengths) - 1)
+        fft_len = next_fast_len_ge(true_len)
+        ref_len = lengths[0]
+        if mode == "full":
+            start = 0
+            out_len = true_len
+        elif mode == "same-first":
+            start = 0
+            out_len = ref_len
+        else:
+            start = (true_len - ref_len) // 2
+            out_len = ref_len
+
+    spectra = [
+        fftnd(np.asarray(s, dtype=np.float64), axes=0, real_input=True, n=[fft_len])
+        for s in signals
+    ]
+    freqs = np.fft.rfftfreq(fft_len, d=1.0 / float(sr))
+    product = _processed_frequency_product(spectra, freqs, processing)
+    y = ifftnd(product, axes=0, real_output=True, n=[fft_len])
+    y = np.asarray(y, dtype=np.float64).ravel()
+    if circular:
+        return y[:out_len]
+    return y[:true_len][start : start + out_len]
+
+
 def _convolve_samples(
     x: np.ndarray,
     h: np.ndarray,
+    sr: Optional[int] = None,
     mode: str = "same-center",
     circular: bool = False,
+    spectral_processing: Optional[AudioSpectralProcessing] = None,
 ) -> np.ndarray:
     """
     Core 1D convolution engine on raw sample arrays.
@@ -142,14 +345,24 @@ def _convolve_samples(
         for c in range(Cx):
             x_c = x2[:, c]
             h_c = h2[:, c]
-            # IMPORTANT: use_real_fft=False to match np.convolve semantics
-            y_c = linear_freq_multiply(
-                x_c,
-                h_c,
-                axes=0,
-                mode=fft_mode,
-                use_real_fft=False,
-            )
+            if spectral_processing is None or spectral_processing.is_neutral():
+                y_c = linear_freq_multiply(
+                    x_c,
+                    h_c,
+                    axes=0,
+                    mode=fft_mode,
+                    use_real_fft=True,
+                )
+            else:
+                if sr is None:
+                    raise ValueError("sr is required for spectral_processing")
+                y_c = _spectral_convolve_channel(
+                    [x_c, h_c],
+                    sr,
+                    mode=mode,
+                    circular=circular,
+                    processing=spectral_processing,
+                )
             y_c = np.asarray(y_c, dtype=np.float64).ravel()
             outs.append(y_c)
             max_len = max(max_len, y_c.size)
@@ -163,13 +376,24 @@ def _convolve_samples(
     # Mismatched channels: downmix to mono
     x_mono = x2.mean(axis=1)
     h_mono = h2.mean(axis=1)
-    y_mono = linear_freq_multiply(
-        x_mono,
-        h_mono,
-        axes=0,
-        mode=fft_mode,
-        use_real_fft=False,  # same reasoning as above
-    )
+    if spectral_processing is None or spectral_processing.is_neutral():
+        y_mono = linear_freq_multiply(
+            x_mono,
+            h_mono,
+            axes=0,
+            mode=fft_mode,
+            use_real_fft=True,
+        )
+    else:
+        if sr is None:
+            raise ValueError("sr is required for spectral_processing")
+        y_mono = _spectral_convolve_channel(
+            [x_mono, h_mono],
+            sr,
+            mode=mode,
+            circular=circular,
+            processing=spectral_processing,
+        )
     y_mono = np.asarray(y_mono, dtype=np.float64).ravel()
     return y_mono[:, None]
 
@@ -186,8 +410,10 @@ def _wrap_audio_output(samples: np.ndarray, sr: int) -> Audio:
 
 def _multi_convolve_samples(
     samples_list: list[np.ndarray],
+    sr: Optional[int] = None,
     mode: str = "same-center",
     circular: bool = False,
+    spectral_processing: Optional[AudioSpectralProcessing] = None,
 ) -> np.ndarray:
     """
     Core multi-signal 1D convolution engine via frequency multiplication.
@@ -226,6 +452,27 @@ def _multi_convolve_samples(
         out_channels = channels[0]
 
     n_signals = len(samples_2d)
+
+    if spectral_processing is not None and not spectral_processing.is_neutral():
+        if sr is None:
+            raise ValueError("sr is required for spectral_processing")
+        if circular:
+            out_len = lengths[0]
+        else:
+            if mode not in ("full", "same-first", "same-center"):
+                raise ValueError(f"Unknown mode {mode!r}")
+            out_len = sum(lengths) - (n_signals - 1) if mode == "full" else lengths[0]
+
+        result = np.empty((out_len, out_channels), dtype=np.float64)
+        for c in range(out_channels):
+            result[:, c] = _spectral_convolve_channel(
+                [s[:, c] for s in channel_sources],
+                sr,
+                mode=mode,
+                circular=circular,
+                processing=spectral_processing,
+            )
+        return result
 
     if circular:
         fft_len = lengths[0]
@@ -280,12 +527,14 @@ def _multi_convolve_samples(
 # Public API
 # ---------------------------------------------------------------------
 
+
 def auto_convolve(
     audio: Audio,
     mode: str = "same-center",
     circular: bool = False,
     normalize: Optional[str] = "rms",
     order: int = 2,
+    spectral_processing: Optional[AudioSpectralProcessing] = None,
 ) -> Audio:
     """
     Self-convolution of an Audio object.
@@ -324,7 +573,14 @@ def auto_convolve(
     # Repeated convolution at the sample level (no normalization between steps)
     samples = np.asarray(audio.samples, dtype=np.float64)
     for _ in range(order - 1):
-        samples = _convolve_samples(samples, audio.samples, mode=mode, circular=circular)
+        samples = _convolve_samples(
+            samples,
+            audio.samples,
+            sr=audio.sr,
+            mode=mode,
+            circular=circular,
+            spectral_processing=spectral_processing,
+        )
 
     # Final normalization only
     samples = apply_normalize(samples, normalize)
@@ -337,6 +593,7 @@ def pair_convolve(
     mode: str = "same-center",
     circular: bool = False,
     normalize: Optional[str] = "rms",
+    spectral_processing: Optional[AudioSpectralProcessing] = None,
 ) -> Audio:
     """
     Convolution of two Audio objects.
@@ -367,7 +624,14 @@ def pair_convolve(
     if x.sr != h.sr:
         raise ValueError(f"Sample rates must match (got {x.sr} vs {h.sr}).")
 
-    samples = _convolve_samples(x.samples, h.samples, mode=mode, circular=circular)
+    samples = _convolve_samples(
+        x.samples,
+        h.samples,
+        sr=x.sr,
+        mode=mode,
+        circular=circular,
+        spectral_processing=spectral_processing,
+    )
     samples = apply_normalize(samples, normalize)
     return _wrap_audio_output(samples, x.sr)
 
@@ -377,6 +641,7 @@ def multi_convolve(
     mode: str = "same-center",
     circular: bool = False,
     normalize: Optional[str] = "rms",
+    spectral_processing: Optional[AudioSpectralProcessing] = None,
 ) -> Audio:
     """
     Convolution of multiple Audio objects via frequency-domain multiplication.
@@ -407,14 +672,20 @@ def multi_convolve(
     """
     if not audios:
         raise ValueError("At least one audio must be provided")
-    
+
     sr = audios[0].sr
     for a in audios[1:]:
         if a.sr != sr:
             raise ValueError(f"All sample rates must match (got {a.sr} vs {sr})")
 
     samples_list = [np.asarray(a.samples, dtype=np.float64) for a in audios]
-    samples = _multi_convolve_samples(samples_list, mode=mode, circular=circular)
+    samples = _multi_convolve_samples(
+        samples_list,
+        sr=sr,
+        mode=mode,
+        circular=circular,
+        spectral_processing=spectral_processing,
+    )
     samples = apply_normalize(samples, normalize)
     return _wrap_audio_output(samples, sr)
 
@@ -430,6 +701,7 @@ def convolution_family(
     include_self: bool = True,
     include_pairs: bool = True,
     include_multi: bool = True,
+    spectral_processing: Optional[AudioSpectralProcessing] = None,
 ) -> list[AudioConvolutionResult]:
     """
     Generate the usual family of 1D convolutions for a set of audio signals.
@@ -496,6 +768,7 @@ def convolution_family(
                 circular=circular,
                 normalize=normalize,
                 order=self_order,
+                spectral_processing=spectral_processing,
             )
             results.append(
                 AudioConvolutionResult(
@@ -514,6 +787,7 @@ def convolution_family(
                 mode=mode,
                 circular=circular,
                 normalize=normalize,
+                spectral_processing=spectral_processing,
             )
             results.append(
                 AudioConvolutionResult(
@@ -530,6 +804,7 @@ def convolution_family(
             mode=mode,
             circular=circular,
             normalize=normalize,
+            spectral_processing=spectral_processing,
         )
         results.append(
             AudioConvolutionResult(

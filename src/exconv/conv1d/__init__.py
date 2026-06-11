@@ -12,15 +12,17 @@ Submodules
 from .audio import (
     Audio,
     AudioConvolutionResult,
+    AudioSpectralProcessing,
     auto_convolve,
-    pair_convolve,
-    multi_convolve,
     convolution_family,
+    multi_convolve,
+    pair_convolve,
 )
 
 __all__ = [
     "Audio",
     "AudioConvolutionResult",
+    "AudioSpectralProcessing",
     "auto_convolve",
     "pair_convolve",
     "multi_convolve",

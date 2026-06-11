@@ -2,7 +2,8 @@
 """FFT utilities and frequency-domain convolution."""
 from __future__ import annotations
 
-from typing import Iterable, Sequence, Tuple, Optional, Union
+from typing import Optional, Sequence, Tuple, Union
+
 import numpy as np
 
 try:
@@ -34,6 +35,7 @@ _FFT = _scipy_fft if _scipy_fft is not None else np.fft
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
 
 def next_fast_len_ge(n: int) -> int:
     """
@@ -87,7 +89,9 @@ def _normalize_axes(x: ArrayLike, axes: AxesLike) -> Tuple[int, ...]:
     return tuple(norm)
 
 
-def _full_linear_shape(sig_shape: Sequence[int], ker_shape: Sequence[int]) -> Tuple[int, ...]:
+def _full_linear_shape(
+    sig_shape: Sequence[int], ker_shape: Sequence[int]
+) -> Tuple[int, ...]:
     return tuple(s + k - 1 for s, k in zip(sig_shape, ker_shape))
 
 
@@ -95,7 +99,9 @@ def _same_first_crop(same_ref: Sequence[int]) -> Tuple[slice, ...]:
     return tuple(slice(0, n) for n in same_ref)
 
 
-def _same_center_crop(full_shape: Sequence[int], same_ref: Sequence[int]) -> Tuple[slice, ...]:
+def _same_center_crop(
+    full_shape: Sequence[int], same_ref: Sequence[int]
+) -> Tuple[slice, ...]:
     slices: list[slice] = []
     for L, N in zip(full_shape, same_ref):
         if N >= L:
@@ -107,7 +113,9 @@ def _same_center_crop(full_shape: Sequence[int], same_ref: Sequence[int]) -> Tup
     return tuple(slices)
 
 
-def pad_to_linear_shape(x: ArrayLike, kernel_shape: Sequence[int], axes: AxesLike = None) -> Tuple[ArrayLike, Tuple[Tuple[int, int], ...]]:
+def pad_to_linear_shape(
+    x: ArrayLike, kernel_shape: Sequence[int], axes: AxesLike = None
+) -> Tuple[ArrayLike, Tuple[Tuple[int, int], ...]]:
     """
     Zero-pad `x` so that along `axes` it can hold a full linear convolution with
     a kernel of shape `kernel_shape`. Other axes are untouched.
@@ -155,7 +163,9 @@ def pad_to_linear_shape(x: ArrayLike, kernel_shape: Sequence[int], axes: AxesLik
     return x_padded, tuple(full_pads)
 
 
-def _fft_shapes_for_linear(sig_shape: Sequence[int], ker_shape: Sequence[int]) -> Tuple[int, ...]:
+def _fft_shapes_for_linear(
+    sig_shape: Sequence[int], ker_shape: Sequence[int]
+) -> Tuple[int, ...]:
     return tuple(next_fast_len_ge(s + k - 1) for s, k in zip(sig_shape, ker_shape))
 
 
@@ -163,7 +173,13 @@ def _fft_shapes_for_linear(sig_shape: Sequence[int], ker_shape: Sequence[int]) -
 # FFT wrappers
 # ---------------------------------------------------------------------------
 
-def fftnd(x: ArrayLike, axes: AxesLike = None, real_input: bool = False, n: Optional[Sequence[int]] = None) -> ArrayLike:
+
+def fftnd(
+    x: ArrayLike,
+    axes: AxesLike = None,
+    real_input: bool = False,
+    n: Optional[Sequence[int]] = None,
+) -> ArrayLike:
     """
     Multi-dimensional FFT wrapper that preserves dtype/complex handling.
 
@@ -190,7 +206,12 @@ def fftnd(x: ArrayLike, axes: AxesLike = None, real_input: bool = False, n: Opti
         return _FFT.fftn(x, s=n, axes=axes_t)
 
 
-def ifftnd(X: ArrayLike, axes: AxesLike = None, real_output: bool = False, n: Optional[Sequence[int]] = None) -> ArrayLike:
+def ifftnd(
+    X: ArrayLike,
+    axes: AxesLike = None,
+    real_output: bool = False,
+    n: Optional[Sequence[int]] = None,
+) -> ArrayLike:
     """
     Multi-dimensional inverse FFT wrapper.
 
@@ -222,7 +243,10 @@ def ifftnd(X: ArrayLike, axes: AxesLike = None, real_output: bool = False, n: Op
 # Frequency-domain linear/circular convolution
 # ---------------------------------------------------------------------------
 
-def _crop_mode(y_full: ArrayLike, mode: str, ref_sig_shape: Sequence[int], axes: Sequence[int]) -> ArrayLike:
+
+def _crop_mode(
+    y_full: ArrayLike, mode: str, ref_sig_shape: Sequence[int], axes: Sequence[int]
+) -> ArrayLike:
     """
     Crop (or pad) full linear result to the requested mode.
     """
@@ -304,10 +328,11 @@ def linear_freq_multiply(
     if mode == "circular":
         # Match signal length along axes; compute circular conv
         n = [x.shape[a] for a in axes_t]
-        X = fftnd(x, axes=axes_t, real_input=False, n=n)
-        H = fftnd(h, axes=axes_t, real_input=False, n=n)
-        Y = X * H
-        y = ifftnd(Y, axes=axes_t, real_output=False, n=n)
+        X = fftnd(x, axes=axes_t, real_input=can_use_real, n=n)
+        H = fftnd(h, axes=axes_t, real_input=can_use_real, n=n)
+        X *= H
+        del H
+        y = ifftnd(X, axes=axes_t, real_output=can_use_real, n=n)
         # For real-input circular conv the output should be real (imag ~ 0)
         return y.real if x_is_real and h_is_real else y
 
@@ -319,17 +344,22 @@ def linear_freq_multiply(
     if can_use_real:
         X = fftnd(x, axes=axes_t, real_input=True, n=fft_shape)
         H = fftnd(h, axes=axes_t, real_input=True, n=fft_shape)
-        Y = X * H
-        # Real output length along axes is linear size (s+k-1)
+        X *= H
+        del H
         full_linear = tuple(s + k - 1 for s, k in zip(sig_shape, ker_shape))
-        y_full = ifftnd(Y, axes=axes_t, real_output=True, n=full_linear)
+        y_tmp = ifftnd(X, axes=axes_t, real_output=True, n=fft_shape)
+        slices = [slice(None)] * y_tmp.ndim
+        for ax, L in zip(axes_t, full_linear):
+            slices[ax] = slice(0, L)
+        y_full = y_tmp[tuple(slices)]
     else:
         # Complex FFT path
         X = fftnd(x, axes=axes_t, real_input=False, n=fft_shape)
         H = fftnd(h, axes=axes_t, real_input=False, n=fft_shape)
-        Y = X * H
+        X *= H
+        del H
         full_linear = tuple(s + k - 1 for s, k in zip(sig_shape, ker_shape))
-        y_tmp = ifftnd(Y, axes=axes_t, real_output=False, n=fft_shape)
+        y_tmp = ifftnd(X, axes=axes_t, real_output=False, n=fft_shape)
         # Trim to the true full linear shape
         slices = [slice(None)] * y_tmp.ndim
         for ax, L in zip(axes_t, full_linear):
@@ -340,7 +370,9 @@ def linear_freq_multiply(
         return y_full.real if x_is_real and h_is_real else y_full
 
     if mode in ("same-first", "same-center"):
-        cropped = _crop_mode(y_full, mode, ref_sig_shape=[x.shape[a] for a in axes_t], axes=axes_t)
+        cropped = _crop_mode(
+            y_full, mode, ref_sig_shape=[x.shape[a] for a in axes_t], axes=axes_t
+        )
         return cropped.real if x_is_real and h_is_real else cropped
 
     raise ValueError(f"Unknown mode {mode!r}")
@@ -349,7 +381,9 @@ def linear_freq_multiply(
 # ---------------------------------------------------------------------------
 # Hermitian symmetry helpers
 # ---------------------------------------------------------------------------
-def make_hermitian_symmetric_unshifted(F: ArrayLike, axes: AxesLike = None) -> ArrayLike:
+def make_hermitian_symmetric_unshifted(
+    F: ArrayLike, axes: AxesLike = None
+) -> ArrayLike:
     """
     Enforce Hermitian symmetry on an *unshifted* complex spectrum F so that
     np.fft.ifftn(F, axes=axes) is (numerically) real.
@@ -480,18 +514,26 @@ def make_hermitian_symmetric_unshifted(F: ArrayLike, axes: AxesLike = None) -> A
 
     # Generate the orbit under {A0, B0}. Two involutions can generate up to 8 elements.
     orbit = []
+
     def _add(E):
         orbit.append(E)
 
     X = X0
     _add(X)
-    X_A = A0(X); _add(X_A)
-    X_B = B0(X); _add(X_B)
-    X_AB = A0(X_B); _add(X_AB)
-    X_BA = B0(X_A); _add(X_BA)
-    X_ABA = A0(X_BA); _add(X_ABA)
-    X_BAB = B0(X_AB); _add(X_BAB)
-    X_ABAB = A0(X_BAB); _add(X_ABAB)
+    X_A = A0(X)
+    _add(X_A)
+    X_B = B0(X)
+    _add(X_B)
+    X_AB = A0(X_B)
+    _add(X_AB)
+    X_BA = B0(X_A)
+    _add(X_BA)
+    X_ABA = A0(X_BA)
+    _add(X_ABA)
+    X_BAB = B0(X_AB)
+    _add(X_BAB)
+    X_ABAB = A0(X_BAB)
+    _add(X_ABAB)
 
     Xavg = sum(orbit) / len(orbit)
 

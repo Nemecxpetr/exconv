@@ -182,7 +182,8 @@ Note: `scripts/_video_folderbatch.py` still exists as a legacy wrapper; use
 ### `exconv folderbatch` - audio + sound2image batches
 - Purpose: batch self/pair audio convolution and optional sound->image sculpting. The all-files N-fold output is available as an explicit opt-in.
 - Inputs: `<root>/input/audio/<project>/*` (required),
-  `<root>/input/img/<project>/*` (optional, enables sound->image).
+  `<root>/input/img/<project>/*` (optional, enables sound->image). Use
+  `--recursive` to include files in subfolders.
 - Outputs: `<root>/output/audio/<project>/{self,pair}/` and
   `<root>/output/sound2image/<project>/`. With `--audio-multi` or
   `--audio-multi-circular`, also writes `<root>/output/audio/<project>/multi/`.
@@ -198,16 +199,33 @@ Note: `scripts/_video_folderbatch.py` still exists as a legacy wrapper; use
   | --- | --- | --- |
   | `project` (positional) | required | Project name under `<root>/input/audio/` and optionally `<root>/input/img/`. |
   | `--root` | `samples` | Base folder containing `input/` and `output/`. |
+  | `--recursive` | off | Recurse into subfolders under the project input folders. Nested output names include relative folder parts. |
 
   | Audio convolution | Default | What it does |
   | --- | --- | --- |
   | `--audio-mode` | `same-center` | Linear convolution size policy: `full`, `same-first`, `same-center`. |
   | `--audio-order` | `2` | Self-convolution order for files in the `self/` output. |
   | `--audio-circular` | off | Use circular convolution for self, pair and multi outputs. |
+  | `--audio-no-pairs` | off | Skip unordered pair convolution outputs. |
+  | `--audio-max-pairs` | `10000` | Hard ceiling for sampled unordered pairs; `0` disables the ceiling. |
+  | `--audio-pair-sample-factor` | `1.1` | Target sampled pair count as `factor * file_count` when all pairs would be too many. |
+  | `--audio-pair-seed` | `0` | Random seed for balanced pair sampling. |
   | `--audio-multi` | off | Also write one all-files N-fold convolution into `multi/`. |
   | `--audio-multi-circular` | off | Enable the all-files N-fold output and use circular convolution for it. This is the practical choice for long projects. |
   | `--audio-normalize` | `rms` | Output normalization: `rms`, `peak`, `none`. |
   | `--audio-subtype` | `PCM_16` | libsndfile subtype, for example `PCM_16`, `PCM_24`, or `FLOAT`. |
+  | `--audio-spectral` | off | Enable creative spectral shaping around audio FFT multiplication. Neutral by itself; add shaping controls to hear an effect. |
+  | `--audio-spectral-crossover` | `80` | Bass/treble transition start in Hz. |
+  | `--audio-spectral-transition` | `400` | Bass/treble transition end in Hz. |
+  | `--audio-low-preserve` | `0` | Blend low bins back toward the reference input spectrum. |
+  | `--audio-phase-low` | `1` | Kernel phase contribution below crossover; lower values stabilize bass phase. |
+  | `--audio-bass-blur` | `0` | Low-frequency magnitude blur amount. |
+  | `--audio-treble-sharpen` | `0` | High-frequency unsharp-mask amount. |
+  | `--audio-high-gain-db` | `0` | Frequency-dependent high-frequency gain in dB. |
+  | `--audio-spectral-contrast` | `1` | High-frequency spectral contrast. |
+
+  See [`audio_spectral_processing.md`](audio_spectral_processing.md) for the
+  full tutorial, Python API, and recipes.
 
   Multi-convolution note: linear N-fold convolution can be very large because
   full length is `sum(lengths) - (N - 1)`. It is disabled by default. If an

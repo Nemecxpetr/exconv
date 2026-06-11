@@ -553,6 +553,7 @@ from exconv.io import (
 from exconv.conv1d import (
     Audio,
     AudioConvolutionResult,
+    AudioSpectralProcessing,
     auto_convolve,
     pair_convolve,
     multi_convolve,
@@ -633,6 +634,8 @@ out = auto_convolve(
 
     order: int = 2,
 
+    spectral_processing: Optional[AudioSpectralProcessing] = None,
+
 ) -> Audio
 
 ```
@@ -646,6 +649,7 @@ out = auto_convolve(
 | `circular` | If `True`, perform circular convolution.         |
 | `normalize`| Output normalization applied once at the end.    |
 | `order`    | n-th order self-conv: 1  copy, 2  x*x, 3  x*x*x |
+| `spectral_processing` | Optional creative spectrum shaping. |
 
 
 
@@ -683,6 +687,8 @@ out = pair_convolve(
 
     normalize: Optional[str] = "rms",
 
+    spectral_processing: Optional[AudioSpectralProcessing] = None,
+
 ) -> Audio
 
 ```
@@ -696,6 +702,7 @@ out = pair_convolve(
 | `mode`    | Linear size policy if not `circular`.            |
 | `circular`| Circular vs linear convolution.                  |
 | `normalize`| Output normalization.                           |
+| `spectral_processing` | Optional creative spectrum shaping. |
 
 
 
@@ -727,6 +734,8 @@ out = multi_convolve(
 
     normalize: Optional[str] = "rms",
 
+    spectral_processing: Optional[AudioSpectralProcessing] = None,
+
 ) -> Audio
 
 ```
@@ -745,6 +754,7 @@ taking one inverse FFT.
 | `mode` | Linear size policy if `circular=False`. |
 | `circular` | If `True`, use circular convolution with the first audio length. |
 | `normalize` | Output normalization applied once at the end. |
+| `spectral_processing` | Optional creative spectrum shaping. |
 
 
 
@@ -766,7 +776,81 @@ per-channel; mixed mono/stereo/multi-channel inputs are downmixed to mono.
 
 
 
-### 3.5 `convolution_family`
+### 3.5 `AudioSpectralProcessing`
+
+
+
+```python
+
+from exconv.conv1d import AudioSpectralProcessing
+
+
+
+processing = AudioSpectralProcessing(
+
+    crossover_hz=80.0,
+
+    transition_hz=400.0,
+
+    bass_blur=0.35,
+
+    treble_sharpen=0.7,
+
+    high_gain_db=3.0,
+
+    contrast=1.1,
+
+    low_preserve=0.8,
+
+    phase_low=0.2,
+
+    phase_high=1.0,
+
+    blur_bins=5,
+
+    max_gain_db=18.0,
+
+    process_operands=False,
+
+)
+
+```
+
+
+
+Optional creative spectrum shaping for audio convolution. It can be passed to
+`auto_convolve`, `pair_convolve`, `multi_convolve`, or `convolution_family`.
+When omitted, convolution remains the plain FFT product.
+
+
+
+| Param | Description |
+|-------|-------------|
+| `crossover_hz` | Frequency where bass processing/protection starts fading out. |
+| `transition_hz` | Frequency where treble processing is fully active. |
+| `bass_blur` | 0..1 low-frequency magnitude blur amount. This is a 1D blur over frequency bins only, not a time-frame blur. |
+| `treble_sharpen` | High-frequency unsharp-mask amount. |
+| `high_gain_db` | Frequency-dependent high-shelf gain in dB. |
+| `contrast` | High-frequency spectral contrast; `1.0` is neutral. |
+| `low_preserve` | 0..1 blend low bins back toward the reference input spectrum. |
+| `phase_low` | Kernel/secondary phase contribution below crossover. |
+| `phase_high` | Kernel/secondary phase contribution above transition. |
+| `blur_bins` | Gaussian blur radius in rFFT bins. |
+| `max_gain_db` | Clamp for magnitude growth relative to the unprocessed product. |
+| `process_operands` | If `True`, shape each operand spectrum before multiplication. |
+
+
+
+See [`audio_spectral_processing.md`](audio_spectral_processing.md) for a
+tutorial, recipes, and the frequency-only blur algorithm.
+
+
+
+---
+
+
+
+### 3.6 `convolution_family`
 
 
 
@@ -798,6 +882,8 @@ results = convolution_family(
 
     include_multi: bool = True,
 
+    spectral_processing: Optional[AudioSpectralProcessing] = None,
+
 ) -> list[AudioConvolutionResult]
 
 ```
@@ -820,6 +906,7 @@ unordered pair-convolutions, and one all-input N-fold convolution.
 | `include_self` | Include one self-convolution per input. |
 | `include_pairs` | Include every unordered pair. |
 | `include_multi` | Include one all-input N-fold result when there are at least two inputs. |
+| `spectral_processing` | Optional creative spectrum shaping for all generated audio outputs. |
 
 
 
@@ -1160,6 +1247,14 @@ exconv audio-auto     --in input.wav     --out out.wav     --mode same-center   
 
 Maps directly to `conv1d.auto_convolve`.
 
+Optional spectral shaping flags include `--spectral`,
+`--low-preserve`, `--bass-blur`, `--treble-sharpen`,
+`--high-gain-db`, `--spectral-contrast`, `--phase-low`, and
+`--spectral-operands`. `--spectral` alone enables the code path with neutral
+defaults, so it should sound like normal convolution until another shaping flag
+is changed. See
+[`audio_spectral_processing.md`](audio_spectral_processing.md).
+
 
 
 ### 7.3 `img-auto`
@@ -1258,8 +1353,10 @@ exconv folderbatch my_project --root samples --audio-mode same-center --audio-or
 
 Batch audio self/pair convolution plus optional sound->image outputs across a
 project folder. The all-input N-fold output is explicit opt-in via
-`--audio-multi` or `--audio-multi-circular`. See `docs/scripts.md` for the
-complete grouped flag list and the expected `samples/` folder layout.
+`--audio-multi` or `--audio-multi-circular`. Use `--recursive` to include
+subfolders under the project audio and image input folders. See
+`docs/scripts.md` for the complete grouped flag list and the expected
+`samples/` folder layout.
 
 Audio outputs:
 
@@ -1276,10 +1373,20 @@ Audio options:
 | `--audio-mode` | Linear convolution size policy: `full`, `same-first`, `same-center`. |
 | `--audio-order` | Self-convolution order. |
 | `--audio-circular` | Use circular convolution for all audio outputs. |
+| `--audio-no-pairs` | Skip unordered pair convolution outputs. |
+| `--audio-max-pairs` | Hard ceiling for sampled unordered pairs; `0` disables the ceiling. |
+| `--audio-pair-sample-factor` | Target sampled pair count as `factor * file_count`. |
+| `--audio-pair-seed` | Random seed for balanced pair sampling. |
 | `--audio-multi` | Also write one all-files N-fold convolution. |
 | `--audio-multi-circular` | Enable the all-files N-fold output and use circular convolution for it. |
 | `--audio-normalize` | `rms`, `peak`, or `none`. |
 | `--audio-subtype` | libsndfile subtype for WAV/FLAC outputs. |
+| `--audio-spectral` | Enable creative spectral shaping around audio FFT multiplication. Neutral by itself. |
+| `--audio-low-preserve` | Blend low bins back toward the reference input spectrum. |
+| `--audio-bass-blur` | Blur low-frequency magnitudes. |
+| `--audio-treble-sharpen` | Sharpen high-frequency magnitudes. |
+| `--audio-high-gain-db` | Add frequency-dependent high-frequency gain. |
+| `--recursive` | Recurse into subfolders under the project input folders. |
 
 Use `--s2i-animate` to emit per-audio animations into the `animations/`
 subfolder (defaults to mp4 with audio unless `--s2i-animate-no-audio`).
